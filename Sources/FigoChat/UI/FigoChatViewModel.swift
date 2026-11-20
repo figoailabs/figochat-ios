@@ -21,7 +21,12 @@ final class FigoChatViewModel: ObservableObject {
     @Published var messages: [FigoChatMessage] = []
     @Published var input = ""
     @Published var pending: [PendingFile] = []
-    @Published private(set) var waiting = false
+    /// A reply to a message sent from this screen is on its way.
+    @Published private(set) var replying = false
+    /// Display details of the assistant, once loaded.
+    @Published private(set) var assistant: FigoAssistantInfo?
+    /// The `firstCustomerMessage` exchange from `initialize`.
+    @Published private(set) var first: FigoFirstExchange?
     @Published private(set) var recording = false
     @Published private(set) var recordingSeconds = 0
     @Published private(set) var transcribing = false
@@ -35,26 +40,61 @@ final class FigoChatViewModel: ObservableObject {
     private var recordTimer: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
     private var changes: AnyCancellable?
+    private var conversation = FigoChat.conversation
 
     init() {
-        resetMessages()
+        assistant = FigoChat.assistantInfo
+        first = FigoChat.firstExchange
         changes = FigoChat.changes.sink { [weak self] in
             guard let self else { return }
-            if FigoChat.isInitialized && FigoChat.threadId == nil { self.resetMessages() }
+            self.assistant = FigoChat.assistantInfo
+            self.first = FigoChat.firstExchange
+            // a new session, a new conversation or a logout: start from an empty screen
+            if self.conversation != FigoChat.conversation {
+                self.conversation = FigoChat.conversation
+                self.messages.removeAll()
+                self.subscription?.stop()
+                self.subscription = nil
+            }
             self.syncRealtime()
         }
+    }
+
+    /// A reply is on its way: one the user just asked for, or the one to `firstCustomerMessage`. Sending is blocked.
+    var waiting: Bool { replying || (first.map { !$0.done } ?? false) }
+
+    /// Header title: the persona, else the assistant name, else "Chat".
+    var title: String {
+        [assistant?.persona, assistant?.assistantName]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? "Chat"
+    }
+
+    /// The assistant's waiting message as plain text, shown while a reply is on its way; nil shows typing dots.
+    var waitingText: String? {
+        let text = htmlToText(assistant?.waitingMessage ?? "")
+        return text.isEmpty ? nil : text
+    }
+
+    /// What the screen shows: the intro message, the first exchange, then the messages sent from this screen.
+    var displayMessages: [FigoChatMessage] {
+        var all: [FigoChatMessage] = []
+        if let intro = assistant?.introMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !intro.isEmpty {
+            all.append(FigoChatMessage(id: "welcome", role: .assistant, text: intro, createdAt: .distantPast))
+        }
+        if let first {
+            all.append(first.message)
+            if let reply = first.reply { all.append(reply) }
+            if let error = first.error {
+                all.append(FigoChatMessage(id: "\(first.message.id)-error", role: .system, text: friendlyMessage(error, context: .chat)))
+            }
+        }
+        return all + messages
     }
 
     private func newId() -> String {
         ids += 1
         return "\(Date().timeIntervalSince1970)-\(ids)"
-    }
-
-    private func resetMessages() {
-        messages.removeAll()
-        if let welcome = (try? FigoChat.config)?.welcomeMessage, !welcome.isEmpty {
-            messages.append(FigoChatMessage(id: "welcome", role: .assistant, text: welcome))
-        }
     }
 
     @discardableResult
@@ -116,9 +156,9 @@ final class FigoChatViewModel: ObservableObject {
     }
 
     private func ask(_ message: FigoChatMessage) {
-        waiting = true
+        replying = true
         Task {
-            defer { waiting = false }
+            defer { replying = false }
             do {
                 let reply = try await FigoChat.client.sendMessage(message.text, attachmentURLs: message.attachments.map(\.url))
                 update(message.id) { $0.status = .sent }
@@ -166,6 +206,10 @@ final class FigoChatViewModel: ObservableObject {
 
     func retry(_ message: FigoChatMessage) {
         if waiting { return }
+        if message.id == first?.message.id {
+            FigoChat.retryFirstMessage()
+            return
+        }
         update(message.id) { $0.status = .sending }
         ask(message)
     }

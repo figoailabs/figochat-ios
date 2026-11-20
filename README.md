@@ -10,12 +10,12 @@ Native iOS (Swift, SwiftUI) SDK for chatting with a Figo AI assistant. Users can
 
 The SDK is open source at [github.com/figoailabs/figochat-ios](https://github.com/figoailabs/figochat-ios).
 
-In Xcode, choose **File → Add Package Dependencies…**, enter `https://github.com/figoailabs/figochat-ios`, choose **Up to Next Major Version** from `1.1.0`, and add the `FigoChat` library to your app target.
+In Xcode, choose **File → Add Package Dependencies…**, enter `https://github.com/figoailabs/figochat-ios`, choose **Up to Next Major Version** from `2.0.0`, and add the `FigoChat` library to your app target.
 
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/figoailabs/figochat-ios.git", from: "1.1.0"),
+    .package(url: "https://github.com/figoailabs/figochat-ios.git", from: "2.0.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "FigoChat", package: "figochat-ios")]),
@@ -43,11 +43,12 @@ try FigoChat.initialize(
     mobilePhone: "+2348012345678",
     assistantId: "YOUR_ASSISTANT_ID",
     primaryColor: "#F97316",
-    // optional
-    title: "Support",
-    welcomeMessage: "Hi Ada! How can I help you today?"
+    // optional: send the customer's first question for them
+    firstCustomerMessage: "Where is my order #1042?"
 )
 ```
+
+The header title, welcome message and waiting message come from the chatbot's settings in the FigoChat admin (**AI Chatbots** → your chatbot → **Edit**: **Persona** or **Name**, **Welcome Message**, **Choose a Waiting Message**), so they aren't passed to `initialize`. `firstCustomerMessage` is sent for the customer straight away; the chat opens with it and its reply, and continues the same thread.
 
 `initialize` throws `FigoChatError` with code `CONFIG` if a required value is empty or the color isn't hex.
 

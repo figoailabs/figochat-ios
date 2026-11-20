@@ -18,8 +18,9 @@ struct FigoChatExampleApp: App {
                 mobilePhone: "+2348012345678",
                 assistantId: env["FIGO_ASSISTANT_ID"].flatMap { $0.isEmpty ? nil : $0 } ?? "missing-assistant-id",
                 primaryColor: "#F97316",
-                title: "Support",
-                welcomeMessage: "<p><b>Hi Ada!</b> How can I help you today?</p><ul><li>Buy airtime or data</li><li>Pay bills</li></ul><p>Visit <a href=\"https://figolabs.ai\">our site</a>.</p>"
+                baseURL: env["FIGO_BASE_URL"].flatMap { URL(string: $0) } ?? FigoChatConfig.defaultBaseURL,
+                // optional: a question to send as soon as the SDK starts, e.g. FIGO_FIRST_MESSAGE="What is my balance?"
+                firstCustomerMessage: env["FIGO_FIRST_MESSAGE"].flatMap { $0.isEmpty ? nil : $0 }
             )
         } catch {
             _setupError = State(initialValue: error.localizedDescription)

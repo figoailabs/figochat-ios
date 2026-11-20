@@ -5,6 +5,7 @@ import Foundation
 ///  - POST /api/v1/stt                            speech to text (multipart, field `audio`)
 ///  - POST /api/v1/cdn/upload/ocr/{assistantId}   upload files to the CDN (images are OCR'd)
 ///  - GET  /api/v1/realtime/config                public Pusher settings for live agent messages
+///  - GET  /api/v1/sdk/assistant/{assistantId}     the assistant's name, persona, waiting and intro messages
 public final class FigoChatClient {
     private let config: FigoChatConfig
     private let session: URLSession
@@ -15,11 +16,17 @@ public final class FigoChatClient {
     private static let codeSuccess = "00"
     private static let codeLimitReached = "49"
 
+    /// Test seam: URLProtocol classes put in front of the default ones on clients created afterwards.
+    static var protocolClassesForTesting: [AnyClass]?
+
     init(config: FigoChatConfig) {
         self.config = config
         let sessionConfig = URLSessionConfiguration.default
         sessionConfig.timeoutIntervalForRequest = config.timeout
         sessionConfig.timeoutIntervalForResource = config.timeout
+        if let classes = Self.protocolClassesForTesting {
+            sessionConfig.protocolClasses = classes + (sessionConfig.protocolClasses ?? [])
+        }
         session = URLSession(configuration: sessionConfig)
         _threadId = config.threadId
     }
@@ -102,6 +109,18 @@ public final class FigoChatClient {
             throw FigoChatError(json["responseMessage"] as? String ?? "Upload failed.", code: json["responseCode"] as? String ?? "UPLOAD")
         }
         return urls
+    }
+
+    /// The assistant's display details: name, persona, waiting message and intro message.
+    public func getAssistant() async throws -> FigoAssistantInfo {
+        let (json, _) = try await perform(makeRequest(["api", "v1", "sdk", "assistant", config.assistantId], method: "GET"))
+        let data = json["responseData"] as? [String: Any] ?? [:]
+        return FigoAssistantInfo(
+            assistantName: data["assistantName"] as? String,
+            persona: data["persona"] as? String,
+            waitingMessage: data["waitingMessage"] as? String,
+            introMessage: data["introMessage"] as? String
+        )
     }
 
     /// Public Pusher settings used to subscribe to the thread channel for live agent messages.

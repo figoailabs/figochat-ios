@@ -9,6 +9,10 @@ public enum FigoChat {
         let config: FigoChatConfig
         let client: FigoChatClient
         let realtime: FigoRealtimeConfigStore
+        /// Display details from `GET /api/v1/sdk/assistant/{id}`; nil until loaded (or if loading failed). Guarded by `lock`.
+        var assistant: FigoAssistantInfo?
+        /// The `firstCustomerMessage` exchange. Guarded by `lock`.
+        var first: FigoFirstExchange?
 
         init(config: FigoChatConfig) {
             self.config = config
@@ -21,8 +25,13 @@ public enum FigoChat {
     private static let lock = NSLock()
     private static var session: Session?
 
-    /// Fires on initialize / reset / logout so open chat screens refresh.
+    /// Fires on initialize / reset / logout, and when the assistant details or the first exchange arrive, so open
+    /// chat screens refresh.
     static let changes = PassthroughSubject<Void, Never>()
+
+    /// Changes on initialize / resetConversation / logout: chat screens clear their own messages when it does.
+    private static var _conversation = 0
+    static var conversation: Int { lock.withLock { _conversation } }
 
     public static func initialize(
         apiKey: String,
@@ -32,8 +41,7 @@ public enum FigoChat {
         assistantId: String,
         primaryColor: String,
         baseURL: URL = FigoChatConfig.defaultBaseURL,
-        title: String = "Chat",
-        welcomeMessage: String? = nil,
+        firstCustomerMessage: String? = nil,
         threadId: String? = nil,
         maxFiles: Int = 5,
         maxFileSizeMB: Int = 10,
@@ -61,15 +69,20 @@ public enum FigoChat {
             mobilePhone: trim(mobilePhone),
             primaryColor: trim(primaryColor),
             baseURL: baseURL,
-            title: title,
-            welcomeMessage: welcomeMessage,
+            firstCustomerMessage: firstCustomerMessage,
             threadId: threadId,
             maxFiles: maxFiles,
             maxFileSizeMB: maxFileSizeMB,
             autoSendVoice: autoSendVoice,
             timeout: timeout
         )
-        lock.withLock { session = Session(config: config) }
+        let newSession = Session(config: config)
+        lock.withLock {
+            session = newSession
+            _conversation += 1
+        }
+        loadAssistant(newSession)
+        if let first = firstCustomerMessage.map(trim), !first.isEmpty { sendFirstMessage(newSession, first) }
         notifyChange()
     }
 
@@ -88,18 +101,43 @@ public enum FigoChat {
         get throws { try requireSession().realtime }
     }
 
+    /// The assistant's display details (name, persona, waiting message, intro message), or nil until they have
+    /// loaded. They're fetched by `initialize`.
+    public static var assistantInfo: FigoAssistantInfo? { lock.withLock { session?.assistant } }
+
+    /// The `firstCustomerMessage` exchange, shown at the top of the chat.
+    static var firstExchange: FigoFirstExchange? { lock.withLock { session?.first } }
+
+    /// Sends the `firstCustomerMessage` again after it failed (the chat's "Tap to retry").
+    static func retryFirstMessage() {
+        let target = lock.withLock { () -> (Session, String)? in
+            guard let session, let first = session.first, first.done, first.error != nil else { return nil }
+            return (session, first.message.text)
+        }
+        guard let (session, text) = target else { return }
+        sendFirstMessage(session, text)
+        notifyChange()
+    }
+
     /// Thread id of the current conversation; store it and pass it as `threadId` to resume later.
     public static var threadId: String? { lock.withLock { session?.client.threadId } }
 
     /// Starts a new conversation on the next message.
     public static func resetConversation() {
-        lock.withLock { session?.client.resetThread() }
+        lock.withLock {
+            session?.client.resetThread()
+            session?.first = nil
+            _conversation += 1
+        }
         notifyChange()
     }
 
     /// Clears the configuration, e.g. when the user signs out.
     public static func logout() {
-        lock.withLock { session = nil }
+        lock.withLock {
+            session = nil
+            _conversation += 1
+        }
         notifyChange()
     }
 
@@ -166,6 +204,49 @@ public enum FigoChat {
         presenter.present(controller, animated: animated)
     }
 
+    private static func loadAssistant(_ target: Session) {
+        Task {
+            // the chat still works without it: default title, no intro, typing dots instead of the waiting message
+            guard let info = try? await target.client.getAssistant() else { return }
+            let current = lock.withLock { () -> Bool in
+                guard session === target else { return false }
+                target.assistant = info
+                return true
+            }
+            if current { notifyChange() }
+        }
+    }
+
+    private static func sendFirstMessage(_ target: Session, _ text: String) {
+        let message = FigoChatMessage(id: "first-\(UUID().uuidString)", role: .user, text: text, status: .sending)
+        lock.withLock { target.first = FigoFirstExchange(message: message) }
+        Task {
+            var result = FigoFirstExchange(message: message, done: true)
+            var replyText = ""
+            do {
+                let reply = try await target.client.sendMessage(text)
+                result.message.status = .sent
+                replyText = htmlToText(reply.answer)
+                if !replyText.isEmpty {
+                    result.reply = FigoChatMessage(id: "\(message.id)-reply", role: .assistant, text: reply.answer)
+                }
+            } catch {
+                result.message.status = .error
+                result.error = error as? FigoChatError ?? FigoChatError(error.localizedDescription, code: "UNKNOWN")
+            }
+            let current = lock.withLock { () -> Bool in
+                guard target.first?.message.id == message.id else { return false }
+                target.first = result
+                return session === target
+            }
+            if result.error == nil {
+                emit(.messageSent, text)
+                if !replyText.isEmpty { emit(.messageReceived, replyText) }
+            }
+            if current { notifyChange() }
+        }
+    }
+
     private static func requireSession() throws -> Session {
         guard let session = lock.withLock({ session }) else {
             throw FigoChatError("FigoChat is not initialized. Call FigoChat.initialize(...) first.", code: "NOT_INITIALIZED")
@@ -176,6 +257,16 @@ public enum FigoChat {
     private static func notifyChange() {
         if Thread.isMainThread { changes.send() } else { DispatchQueue.main.async { changes.send() } }
     }
+}
+
+/// The `firstCustomerMessage` sent by `initialize` and what came back. The chat screen shows it at the top of the
+/// conversation.
+struct FigoFirstExchange: Equatable {
+    var message: FigoChatMessage
+    /// The raw reply (HTML), only when it has text.
+    var reply: FigoChatMessage?
+    var error: FigoChatError?
+    var done = false
 }
 
 /// Returned by `FigoChat.addListener(onMessageSent:onMessageReceived:)`; pass it to `FigoChat.removeListener(_:)`.

@@ -67,17 +67,17 @@ public struct FigoChatView: View {
         let onPrimary = Color.contrasting(hex: config.primaryColor)
 
         return VStack(spacing: 0) {
-            if showHeader { header(title: config.title, primary: primary, onPrimary: onPrimary) }
+            if showHeader { header(title: vm.title, primary: primary, onPrimary: onPrimary) }
 
             GeometryReader { geo in
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 8) {
-                            ForEach(vm.messages) { message in
+                            ForEach(vm.displayMessages) { message in
                                 MessageBubble(message: message, primary: primary, onPrimary: onPrimary) { vm.retry(message) }
                                     .id(message.id)
                             }
-                            if vm.waiting { TypingBubble().id("typing") }
+                            if vm.waiting { WaitingBubble(text: vm.waitingText).id("typing") }
                             Color.clear.frame(height: 1).id("bottom")
                         }
                         .padding(12)
@@ -88,7 +88,7 @@ public struct FigoChatView: View {
                     .scrollDismissesKeyboard(.interactively)
                     // tapping the conversation closes the keyboard; simultaneous so links and "retry" still work
                     .simultaneousGesture(TapGesture().onEnded { inputFocused = false })
-                    .onChange(of: vm.messages.count) { _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+                    .onChange(of: vm.displayMessages.count) { _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
                     .onChange(of: vm.waiting) { _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
                     .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
@@ -365,21 +365,35 @@ private struct AttachmentView: View {
     }
 }
 
-private struct TypingBubble: View {
+/// Shown on the left while a reply is on its way: the assistant's waiting message followed by animated dots, or
+/// just the dots when there is no waiting message.
+private struct WaitingBubble: View {
+    let text: String?
+
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.4)) { context in
-            let dots = Int(context.date.timeIntervalSinceReferenceDate / 0.4) % 3 + 1
-            Text(String(repeating: "•", count: dots))
-                .font(.system(size: 15))
-                .foregroundColor(textMuted)
-                .frame(width: 24, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    BubbleShape(bottomLeading: 4, bottomTrailing: 18)
-                        .fill(bubbleGrey)
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
+            let dots = String(repeating: "•", count: Int(context.date.timeIntervalSinceReferenceDate / 0.4) % 3 + 1)
+            Group {
+                if let text {
+                    (Text(text).italic().foregroundColor(textMuted)
+                        + Text(" " + dots).foregroundColor(Color(hex: "#9AA0A6")))
+                        .font(.system(size: 15))
+                        .accessibilityLabel(text)
+                } else {
+                    Text(dots)
+                        .font(.system(size: 15))
+                        .foregroundColor(textMuted)
+                        .frame(width: 24, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                BubbleShape(bottomLeading: 4, bottomTrailing: 18)
+                    .fill(bubbleGrey)
+            )
+            .frame(maxWidth: UIScreen.main.bounds.width * 0.8, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

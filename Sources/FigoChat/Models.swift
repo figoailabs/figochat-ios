@@ -13,9 +13,10 @@ public struct FigoChatConfig: CustomStringConvertible {
     /// Brand color as hex: #RGB, #RRGGBB or #RRGGBBAA.
     public let primaryColor: String
     public let baseURL: URL
-    public let title: String
-    /// First assistant message, shown before the user writes anything.
-    public let welcomeMessage: String?
+    /// Sent on the customer's behalf as soon as `initialize` runs, for example the question they typed on your own
+    /// screen before opening the chat. It is sent like any other message: the reply and the thread id are kept, so
+    /// the chat continues from it and shows both when it opens.
+    public let firstCustomerMessage: String?
     /// Resumes an earlier conversation; use the value from `FigoChat.threadId`.
     public let threadId: String?
     public let maxFiles: Int
@@ -27,6 +28,24 @@ public struct FigoChatConfig: CustomStringConvertible {
     public var description: String { "FigoChatConfig(assistantId: \(assistantId), baseURL: \(baseURL), apiKey: ***)" }
 
     public static let defaultBaseURL = URL(string: "https://api.figolabs.ai")!
+}
+
+/// Display details of the assistant, from `GET /api/v1/sdk/assistant/{assistantId}`. The chat header shows
+/// `persona` (or `assistantName`), the first bubble shows `introMessage`, and `waitingMessage` is shown on the left
+/// while a reply is being prepared. Any field may be nil.
+public struct FigoAssistantInfo: Equatable {
+    public let assistantName: String?
+    public let persona: String?
+    public let waitingMessage: String?
+    /// HTML, rendered like an assistant reply.
+    public let introMessage: String?
+
+    public init(assistantName: String? = nil, persona: String? = nil, waitingMessage: String? = nil, introMessage: String? = nil) {
+        self.assistantName = assistantName
+        self.persona = persona
+        self.waitingMessage = waitingMessage
+        self.introMessage = introMessage
+    }
 }
 
 /// Error thrown by every SDK call. `code` is the API response code or the HTTP status.
