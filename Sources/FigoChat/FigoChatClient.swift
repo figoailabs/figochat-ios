@@ -8,6 +8,8 @@ import Foundation
 ///  - GET  /api/v1/sdk/assistant/{assistantId}     the assistant's name, persona, waiting and intro messages
 public final class FigoChatClient {
     private let config: FigoChatConfig
+    /// Name, email and phone sent with messages; `FigoChat.setCustomerDetails` changes them. Guarded by `lock`.
+    private var _details: FigoCustomerDetails
     private let session: URLSession
     private let lock = NSLock()
     private var _threadId: String?
@@ -29,6 +31,14 @@ public final class FigoChatClient {
         }
         session = URLSession(configuration: sessionConfig)
         _threadId = config.threadId
+        _details = FigoCustomerDetails(fullName: config.fullName, emailAddress: config.emailAddress, mobilePhone: config.mobilePhone)
+    }
+
+    /// The name, email and phone sent with each message ("" when unknown).
+    public var customerDetails: FigoCustomerDetails { lock.withLock { _details } }
+
+    func setCustomerDetails(_ details: FigoCustomerDetails) {
+        lock.withLock { _details = details }
     }
 
     /// Thread id of the current conversation, once the first reply has arrived.
@@ -53,11 +63,12 @@ public final class FigoChatClient {
             .joined(separator: "\n")
         guard !question.isEmpty else { throw FigoChatError("Message is empty.", code: "EMPTY") }
 
+        let details = customerDetails
         var body: [String: Any] = [
             "question": question,
-            "fullName": config.fullName,
-            "emailAddress": config.emailAddress,
-            "phoneNumber": config.mobilePhone,
+            "fullName": details.fullName,
+            "emailAddress": details.emailAddress,
+            "phoneNumber": details.mobilePhone,
         ]
         if let threadId { body["threadId"] = threadId }
 

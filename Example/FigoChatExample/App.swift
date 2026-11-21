@@ -13,9 +13,10 @@ struct FigoChatExampleApp: App {
         do {
             try FigoChat.initialize(
                 apiKey: env["FIGO_API_KEY"].flatMap { $0.isEmpty ? nil : $0 } ?? "missing-api-key",
-                fullName: "Ada Lovelace",
-                emailAddress: "ada@example.com",
-                mobilePhone: "+2348012345678",
+                // optional: without FIGO_FULL_NAME / FIGO_EMAIL / FIGO_PHONE the chat asks for them in a form first
+                fullName: env["FIGO_FULL_NAME"] ?? "",
+                emailAddress: env["FIGO_EMAIL"] ?? "",
+                mobilePhone: env["FIGO_PHONE"] ?? "",
                 assistantId: env["FIGO_ASSISTANT_ID"].flatMap { $0.isEmpty ? nil : $0 } ?? "missing-assistant-id",
                 primaryColor: "#F97316",
                 baseURL: env["FIGO_BASE_URL"].flatMap { URL(string: $0) } ?? FigoChatConfig.defaultBaseURL,

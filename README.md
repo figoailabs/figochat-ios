@@ -52,6 +52,8 @@ The header title, welcome message and waiting message come from the chatbot's se
 
 `initialize` throws `FigoChatError` with code `CONFIG` if a required value is empty or the color isn't hex.
 
+**Users you don't know:** leave `fullName`, `emailAddress` and `mobilePhone` out and the chat asks for them with a short form (name, email, phone with a searchable country-code picker) that the user can skip. Submitted details are used as if passed to `initialize` and remembered on the device (UserDefaults); `logout` forgets them. Set `askForDetails: false` to skip the form, `defaultCountry` to preselect a country, and call `setCustomerDetails` when the user signs in later.
+
 ## Show the chat
 
 ```swift

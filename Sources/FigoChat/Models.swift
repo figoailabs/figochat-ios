@@ -6,10 +6,13 @@ public struct FigoChatConfig: CustomStringConvertible {
     public let apiKey: String
     /// Assistant the user chats with.
     public let assistantId: String
-    public let fullName: String
-    public let emailAddress: String
-    /// Phone number in international format, e.g. +2348012345678.
-    public let mobilePhone: String
+    /// The customer's name; "" when unknown (the chat then asks for it, see `askForDetails`). Updated by
+    /// `FigoChat.setCustomerDetails` and the details form.
+    public internal(set) var fullName: String
+    /// The customer's email address; "" when unknown.
+    public internal(set) var emailAddress: String
+    /// Phone number in international format, e.g. +2348012345678; "" when unknown.
+    public internal(set) var mobilePhone: String
     /// Brand color as hex: #RGB, #RRGGBB or #RRGGBBAA.
     public let primaryColor: String
     public let baseURL: URL
@@ -24,10 +27,39 @@ public struct FigoChatConfig: CustomStringConvertible {
     /// true sends a transcribed voice note right away; false puts the text in the input for editing.
     public let autoSendVoice: Bool
     public let timeout: TimeInterval
+    /// true (the default) shows a details form (name, email, phone) before the chat when none of the three were
+    /// passed and the visitor hasn't given them before.
+    public let askForDetails: Bool
+    /// Country preselected in the details form's phone field, as an ISO code such as NG or GB; nil uses the
+    /// device region, then NG.
+    public let defaultCountry: String?
 
     public var description: String { "FigoChatConfig(assistantId: \(assistantId), baseURL: \(baseURL), apiKey: ***)" }
 
     public static let defaultBaseURL = URL(string: "https://api.figolabs.ai")!
+}
+
+/// The customer's name, email and phone, as sent with every message. Empty strings when unknown.
+public struct FigoCustomerDetails: Codable, Equatable, Sendable {
+    public var fullName: String
+    public var emailAddress: String
+    /// International format, e.g. +2348012345678.
+    public var mobilePhone: String
+
+    public init(fullName: String = "", emailAddress: String = "", mobilePhone: String = "") {
+        self.fullName = fullName
+        self.emailAddress = emailAddress
+        self.mobilePhone = mobilePhone
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fullName = try c.decodeIfPresent(String.self, forKey: .fullName) ?? ""
+        emailAddress = try c.decodeIfPresent(String.self, forKey: .emailAddress) ?? ""
+        mobilePhone = try c.decodeIfPresent(String.self, forKey: .mobilePhone) ?? ""
+    }
+
+    var isEmpty: Bool { fullName.isEmpty && emailAddress.isEmpty && mobilePhone.isEmpty }
 }
 
 /// Display details of the assistant, from `GET /api/v1/sdk/assistant/{assistantId}`. The chat header shows

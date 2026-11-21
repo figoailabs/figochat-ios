@@ -8,7 +8,8 @@ final class FigoCryptoTests: XCTestCase {
             let first = try crypto.encrypt(value)
             let second = try crypto.encrypt(value)
             XCTAssertNotEqual(first, second)
-            if !value.isEmpty { XCTAssertFalse(first.contains(value)) }
+            // only long values: a short one like "eu" can turn up by chance in random base64
+            if value.count >= 8 { XCTAssertFalse(first.contains(value)) }
             XCTAssertEqual(try crypto.decrypt(first), value)
         }
     }
@@ -275,5 +276,157 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertTrue(FigoChat.isInitialized)
         FigoChat.logout()
         XCTAssertFalse(FigoChat.isInitialized)
+    }
+}
+
+// MARK: - Details form (anonymous visitors), against a fake API
+
+@MainActor
+final class DetailsFormTests: XCTestCase {
+    private let suite = "figochat.tests.details"
+    private var storage: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        FigoChatClient.protocolClassesForTesting = [FakeAPI.self]
+        FakeAPI.reset()
+        storage = UserDefaults(suiteName: suite)
+        FigoChat.storageForTesting = storage
+        reset()
+    }
+
+    override func tearDown() {
+        reset()
+        FigoChat.storageForTesting = nil
+        FigoChatClient.protocolClassesForTesting = nil
+        super.tearDown()
+    }
+
+    /// Like a fresh install: no session, nothing saved, nothing skipped.
+    private func reset() {
+        if FigoChat.isInitialized { FigoChat.logout() }
+        storage.removePersistentDomain(forName: suite)
+        FigoChat.forgetSkipsForTesting()
+    }
+
+    private func initializeAnonymous(firstCustomerMessage: String? = nil, askForDetails: Bool = true, defaultCountry: String? = nil) throws {
+        try FigoChat.initialize(
+            apiKey: "k", assistantId: "asst-1", primaryColor: "#F97316", firstCustomerMessage: firstCustomerMessage,
+            askForDetails: askForDetails, defaultCountry: defaultCountry
+        )
+    }
+
+    private var chatCalls: [FakeAPI.Call] { FakeAPI.calls.filter { $0.url.contains("/chat/assistant/") } }
+
+    private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<300 where !condition() {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(condition(), "timed out", file: file, line: line)
+    }
+
+    private func savedDetails() throws -> FigoCustomerDetails? {
+        try storage.data(forKey: "figochat.details.asst-1").map { try JSONDecoder().decode(FigoCustomerDetails.self, from: $0) }
+    }
+
+    /// Submits the form like a visitor would, with a UK number typed with its trunk 0.
+    private func fillAndSubmit(_ form: FigoDetailsFormModel) throws {
+        form.fullName = "Ada Lovelace"
+        form.emailAddress = "ada@example.com"
+        form.country = try XCTUnwrap(FigoCountry.find("GB"))
+        form.mobilePhone = "07700 900123"
+        form.submit()
+    }
+
+    func testWithoutNameEmailAndPhoneTheChatAsksForThemAndTheFirstMessageWaitsForTheForm() async throws {
+        try initializeAnonymous(firstCustomerMessage: "Where is my order?", defaultCountry: "NG")
+        let screen = FigoChatViewModel()
+        XCTAssertTrue(FigoChat.needsDetails)
+        XCTAssertTrue(screen.needsDetails)
+        XCTAssertNil(FigoChat.firstExchange)
+        let form = FigoDetailsFormModel(defaultCountry: try FigoChat.config.defaultCountry)
+        XCTAssertEqual(form.countryLabel, "🇳🇬 +234")
+        XCTAssertGreaterThan(FigoCountry.all.count, 200)
+        await waitUntil { FigoChat.assistantInfo != nil }
+        XCTAssertEqual(chatCalls.count, 0, "not sent before the form")
+
+        // validation
+        form.submit()
+        XCTAssertEqual(form.error, "Please enter your full name.")
+        form.fullName = "Ada Lovelace"
+        form.emailAddress = "ada@"
+        form.submit()
+        XCTAssertEqual(form.error, "Please enter a valid email address.")
+        form.emailAddress = "ada@example.com"
+        form.mobilePhone = "12"
+        form.submit()
+        XCTAssertEqual(form.error, "Please enter a valid phone number.")
+        XCTAssertTrue(FigoChat.needsDetails)
+
+        // a GB number typed with its trunk 0
+        form.country = try XCTUnwrap(FigoCountry.find("GB"))
+        XCTAssertEqual(form.countryLabel, "🇬🇧 +44")
+        form.mobilePhone = "07700 900123"
+        form.submit()
+        XCTAssertNil(form.error)
+
+        XCTAssertFalse(FigoChat.needsDetails)
+        await waitUntil { !screen.needsDetails }
+        let details = FigoCustomerDetails(fullName: "Ada Lovelace", emailAddress: "ada@example.com", mobilePhone: "+447700900123")
+        XCTAssertEqual(FigoChat.customerDetails, details)
+        await waitUntil { FigoChat.firstExchange?.done == true }
+        let chat = try XCTUnwrap(chatCalls.first)
+        XCTAssertEqual(chat.body as NSDictionary?, [
+            "question": "Where is my order?", "fullName": "Ada Lovelace", "emailAddress": "ada@example.com", "phoneNumber": "+447700900123",
+        ])
+        XCTAssertEqual(try savedDetails(), details)
+    }
+
+    func testAReturningVisitorIsNotAskedAgainAndLogoutForgetsTheirDetails() async throws {
+        try initializeAnonymous()
+        try fillAndSubmit(FigoDetailsFormModel(defaultCountry: nil))
+        XCTAssertNotNil(try savedDetails())
+
+        try initializeAnonymous() // e.g. the next app launch
+        XCTAssertFalse(FigoChat.needsDetails)
+        XCTAssertEqual(FigoChat.customerDetails.emailAddress, "ada@example.com")
+        XCTAssertEqual(try FigoChat.config.mobilePhone, "+447700900123")
+        FigoChat.logout()
+        XCTAssertNil(storage.data(forKey: "figochat.details.asst-1"))
+    }
+
+    func testSkippingChatsWithoutDetailsAndIsRememberedForThisRun() async throws {
+        try initializeAnonymous(firstCustomerMessage: "Hi")
+        XCTAssertTrue(FigoChat.needsDetails)
+        FigoDetailsFormModel(defaultCountry: nil).skip()
+        XCTAssertFalse(FigoChat.needsDetails)
+        await waitUntil { FigoChat.firstExchange?.done == true }
+        let chat = try XCTUnwrap(chatCalls.first)
+        XCTAssertEqual(chat.body as NSDictionary?, ["question": "Hi", "fullName": "", "emailAddress": "", "phoneNumber": ""])
+        XCTAssertTrue(FigoChat.hasSkippedDetails("asst-1"))
+        XCTAssertNil(try savedDetails())
+
+        try initializeAnonymous() // e.g. opening the chat again later in the same run
+        XCTAssertFalse(FigoChat.needsDetails)
+        FigoChat.logout()
+        XCTAssertFalse(FigoChat.hasSkippedDetails("asst-1"))
+    }
+
+    func testSetCustomerDetailsOrAskForDetailsFalseAvoidTheForm() async throws {
+        try initializeAnonymous()
+        XCTAssertTrue(FigoChat.needsDetails)
+        FigoChat.setCustomerDetails(fullName: " Grace ", emailAddress: "g@x.io", mobilePhone: "+15550100")
+        XCTAssertFalse(FigoChat.needsDetails)
+        XCTAssertEqual(FigoChat.customerDetails, FigoCustomerDetails(fullName: "Grace", emailAddress: "g@x.io", mobilePhone: "+15550100"))
+        XCTAssertNil(try savedDetails(), "only the form remembers details")
+
+        _ = try await FigoChat.client.sendMessage("Hello")
+        XCTAssertEqual(chatCalls.last?.body?["fullName"] as? String, "Grace")
+        XCTAssertEqual(chatCalls.last?.body?["phoneNumber"] as? String, "+15550100")
+
+        reset()
+        try initializeAnonymous(askForDetails: false)
+        XCTAssertFalse(FigoChat.needsDetails)
+        XCTAssertEqual(FigoChat.customerDetails, FigoCustomerDetails())
     }
 }

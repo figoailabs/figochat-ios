@@ -2,13 +2,14 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-private let bubbleGrey = Color(red: 0xF1 / 255, green: 0xF3 / 255, blue: 0xF5 / 255)
-private let textDark = Color(red: 0x1F / 255, green: 0x23 / 255, blue: 0x28 / 255)
-private let textMuted = Color(red: 0x6B / 255, green: 0x72 / 255, blue: 0x80 / 255)
-private let errorRed = Color(red: 0xD9 / 255, green: 0x30 / 255, blue: 0x25 / 255)
+let bubbleGrey = Color(red: 0xF1 / 255, green: 0xF3 / 255, blue: 0xF5 / 255)
+let textDark = Color(red: 0x1F / 255, green: 0x23 / 255, blue: 0x28 / 255)
+let textMuted = Color(red: 0x6B / 255, green: 0x72 / 255, blue: 0x80 / 255)
+let errorRed = Color(red: 0xD9 / 255, green: 0x30 / 255, blue: 0x25 / 255)
 
 /// The FigoChat chat screen: message list, text input, voice notes and file attachments.
-/// Call `FigoChat.initialize(...)` before showing it.
+/// Call `FigoChat.initialize(...)` before showing it. For an anonymous visitor it first shows a form asking for their
+/// name, email and phone (see `askForDetails` on `FigoChat.initialize`).
 public struct FigoChatView: View {
     private let onClose: (() -> Void)?
     private let showHeader: Bool
@@ -69,6 +70,33 @@ public struct FigoChatView: View {
         return VStack(spacing: 0) {
             if showHeader { header(title: vm.title, primary: primary, onPrimary: onPrimary) }
 
+            if vm.needsDetails {
+                // anonymous visitor: the details form replaces the conversation until it's submitted or skipped
+                FigoDetailsFormView(defaultCountry: config.defaultCountry, primary: primary, onPrimary: onPrimary)
+                    .frame(maxHeight: .infinity)
+            } else {
+                conversation(config: config, primary: primary, onPrimary: onPrimary)
+            }
+
+            Text(poweredBy)
+                .font(.system(size: 11))
+                .foregroundColor(Color(hex: "#9AA0A6"))
+                .tint(Color(hex: "#9AA0A6"))
+                .frame(maxWidth: .infinity)
+                .padding(.top, 2)
+                .padding(.bottom, 6)
+        }
+        .onAppear {
+            vm.onError = onError
+            vm.appear()
+        }
+        .onDisappear { vm.disappear() }
+    }
+
+    /// Messages, notices, pending files and the input (or recording) bar.
+    @ViewBuilder
+    private func conversation(config: FigoChatConfig, primary: Color, onPrimary: Color) -> some View {
+        VStack(spacing: 0) {
             GeometryReader { geo in
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -114,20 +142,7 @@ public struct FigoChatView: View {
             } else {
                 inputBar(primary: primary, onPrimary: onPrimary)
             }
-
-            Text(poweredBy)
-                .font(.system(size: 11))
-                .foregroundColor(Color(hex: "#9AA0A6"))
-                .tint(Color(hex: "#9AA0A6"))
-                .frame(maxWidth: .infinity)
-                .padding(.top, 2)
-                .padding(.bottom, 6)
         }
-        .onAppear {
-            vm.onError = onError
-            vm.appear()
-        }
-        .onDisappear { vm.disappear() }
         .photosPicker(isPresented: $showPhotos, selection: $photoItems, maxSelectionCount: max(1, config.maxFiles - vm.pending.count), matching: .images)
         .onChange(of: photoItems) { items in
             guard !items.isEmpty else { return }
@@ -149,10 +164,12 @@ public struct FigoChatView: View {
                 .foregroundColor(onPrimary)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button(action: vm.newConversation) {
-                Image(systemName: "arrow.clockwise").foregroundColor(onPrimary)
+            if !vm.needsDetails {
+                Button(action: vm.newConversation) {
+                    Image(systemName: "arrow.clockwise").foregroundColor(onPrimary)
+                }
+                .accessibilityLabel("New conversation")
             }
-            .accessibilityLabel("New conversation")
             if let onClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark").foregroundColor(onPrimary)

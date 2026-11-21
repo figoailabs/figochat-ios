@@ -27,6 +27,8 @@ final class FigoChatViewModel: ObservableObject {
     @Published private(set) var assistant: FigoAssistantInfo?
     /// The `firstCustomerMessage` exchange from `initialize`.
     @Published private(set) var first: FigoFirstExchange?
+    /// An anonymous visitor: the details form is shown instead of the conversation.
+    @Published private(set) var needsDetails = false
     @Published private(set) var recording = false
     @Published private(set) var recordingSeconds = 0
     @Published private(set) var transcribing = false
@@ -45,10 +47,12 @@ final class FigoChatViewModel: ObservableObject {
     init() {
         assistant = FigoChat.assistantInfo
         first = FigoChat.firstExchange
+        needsDetails = FigoChat.needsDetails
         changes = FigoChat.changes.sink { [weak self] in
             guard let self else { return }
             self.assistant = FigoChat.assistantInfo
             self.first = FigoChat.firstExchange
+            self.needsDetails = FigoChat.needsDetails
             // a new session, a new conversation or a logout: start from an empty screen
             if self.conversation != FigoChat.conversation {
                 self.conversation = FigoChat.conversation

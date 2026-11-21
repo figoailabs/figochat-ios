@@ -6,13 +6,18 @@ import UIKit
 /// `present(from:)` (UIKit) or embed `FigoChatView` (SwiftUI).
 public enum FigoChat {
     private final class Session {
-        let config: FigoChatConfig
+        /// Guarded by `lock` (the customer details change with `setCustomerDetails`).
+        var config: FigoChatConfig
         let client: FigoChatClient
         let realtime: FigoRealtimeConfigStore
         /// Display details from `GET /api/v1/sdk/assistant/{id}`; nil until loaded (or if loading failed). Guarded by `lock`.
         var assistant: FigoAssistantInfo?
         /// The `firstCustomerMessage` exchange. Guarded by `lock`.
         var first: FigoFirstExchange?
+        /// An anonymous visitor: the chat shows the details form until it's submitted or skipped. Guarded by `lock`.
+        var needsDetails = false
+        /// `firstCustomerMessage` held back until the details form is submitted or skipped. Guarded by `lock`.
+        var pendingFirst: String?
 
         init(config: FigoChatConfig) {
             self.config = config
@@ -33,11 +38,17 @@ public enum FigoChat {
     private static var _conversation = 0
     static var conversation: Int { lock.withLock { _conversation } }
 
+    /// Configures the SDK, loads the assistant's details and sends `firstCustomerMessage` if one is given. Call it
+    /// again to switch user or settings.
+    ///
+    /// `fullName`, `emailAddress` and `mobilePhone` are optional: when all three are empty and `askForDetails` is
+    /// true, the chat first shows a form asking for them (unless this visitor already filled it in for this
+    /// assistant, or skipped it since the app started). `firstCustomerMessage` is sent once the form is done.
     public static func initialize(
         apiKey: String,
-        fullName: String,
-        emailAddress: String,
-        mobilePhone: String,
+        fullName: String = "",
+        emailAddress: String = "",
+        mobilePhone: String = "",
         assistantId: String,
         primaryColor: String,
         baseURL: URL = FigoChatConfig.defaultBaseURL,
@@ -46,13 +57,12 @@ public enum FigoChat {
         maxFiles: Int = 5,
         maxFileSizeMB: Int = 10,
         autoSendVoice: Bool = true,
-        timeout: TimeInterval = 120
+        timeout: TimeInterval = 120,
+        askForDetails: Bool = true,
+        defaultCountry: String? = nil
     ) throws {
         let trim: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let required = [
-            ("apiKey", apiKey), ("fullName", fullName), ("emailAddress", emailAddress),
-            ("mobilePhone", mobilePhone), ("assistantId", assistantId), ("primaryColor", primaryColor),
-        ]
+        let required = [("apiKey", apiKey), ("assistantId", assistantId), ("primaryColor", primaryColor)]
         let missing = required.filter { trim($0.1).isEmpty }.map(\.0)
         if !missing.isEmpty {
             throw FigoChatError("FigoChat.initialize: missing \(missing.joined(separator: ", ")).", code: "CONFIG")
@@ -61,12 +71,23 @@ public enum FigoChat {
             throw FigoChatError("FigoChat.initialize: primaryColor must be a hex color such as #F97316.", code: "CONFIG")
         }
 
+        // anonymous visitor: reuse the details they gave before, or ask for them (unless they skipped this run)
+        var details = FigoCustomerDetails(fullName: trim(fullName), emailAddress: trim(emailAddress), mobilePhone: trim(mobilePhone))
+        var needsDetails = false
+        if details.isEmpty && askForDetails {
+            if let saved = savedDetails(trim(assistantId)) {
+                details = saved
+            } else {
+                needsDetails = !hasSkippedDetails(trim(assistantId))
+            }
+        }
+
         let config = FigoChatConfig(
             apiKey: trim(apiKey),
             assistantId: trim(assistantId),
-            fullName: trim(fullName),
-            emailAddress: trim(emailAddress),
-            mobilePhone: trim(mobilePhone),
+            fullName: details.fullName,
+            emailAddress: details.emailAddress,
+            mobilePhone: details.mobilePhone,
             primaryColor: trim(primaryColor),
             baseURL: baseURL,
             firstCustomerMessage: firstCustomerMessage,
@@ -74,22 +95,126 @@ public enum FigoChat {
             maxFiles: maxFiles,
             maxFileSizeMB: maxFileSizeMB,
             autoSendVoice: autoSendVoice,
-            timeout: timeout
+            timeout: timeout,
+            askForDetails: askForDetails,
+            defaultCountry: defaultCountry.map(trim).flatMap { $0.isEmpty ? nil : $0.uppercased() }
         )
         let newSession = Session(config: config)
+        let first = firstCustomerMessage.map(trim).flatMap { $0.isEmpty ? nil : $0 }
+        newSession.needsDetails = needsDetails
+        if needsDetails { newSession.pendingFirst = first }
         lock.withLock {
             session = newSession
             _conversation += 1
         }
         loadAssistant(newSession)
-        if let first = firstCustomerMessage.map(trim), !first.isEmpty { sendFirstMessage(newSession, first) }
+        if let first, !needsDetails { sendFirstMessage(newSession, first) }
         notifyChange()
     }
 
     public static var isInitialized: Bool { lock.withLock { session != nil } }
 
     public static var config: FigoChatConfig {
-        get throws { try requireSession().config }
+        get throws {
+            let target = try requireSession()
+            return lock.withLock { target.config }
+        }
+    }
+
+    // MARK: - Customer details
+
+    /// Sets the customer's name, email and phone, for example once a visitor signs in. They're sent with the rest of
+    /// the conversation, exactly as if they'd been passed to `initialize`, and close the details form if it's
+    /// showing (sending a held-back `firstCustomerMessage`). A nil value keeps the current one. Does nothing before
+    /// `initialize`.
+    public static func setCustomerDetails(fullName: String? = nil, emailAddress: String? = nil, mobilePhone: String? = nil) {
+        guard let target = lock.withLock({ session }) else { return }
+        let trim: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let details = lock.withLock { () -> FigoCustomerDetails in
+            target.config.fullName = trim(fullName ?? target.config.fullName)
+            target.config.emailAddress = trim(emailAddress ?? target.config.emailAddress)
+            target.config.mobilePhone = trim(mobilePhone ?? target.config.mobilePhone)
+            return FigoCustomerDetails(
+                fullName: target.config.fullName, emailAddress: target.config.emailAddress, mobilePhone: target.config.mobilePhone
+            )
+        }
+        target.client.setCustomerDetails(details)
+        continueAfterDetails(target)
+    }
+
+    /// The customer's current name, email and phone (empty strings when unknown or before `initialize`).
+    public static var customerDetails: FigoCustomerDetails {
+        lock.withLock {
+            guard let config = session?.config else { return FigoCustomerDetails() }
+            return FigoCustomerDetails(fullName: config.fullName, emailAddress: config.emailAddress, mobilePhone: config.mobilePhone)
+        }
+    }
+
+    /// The chat shows the details form instead of the conversation.
+    static var needsDetails: Bool { lock.withLock { session?.needsDetails ?? false } }
+
+    /// The details form was submitted: remember the details for this assistant and use them.
+    static func submitDetails(_ details: FigoCustomerDetails) {
+        guard let assistantId = lock.withLock({ session?.config.assistantId }) else { return }
+        saveDetails(details, for: assistantId)
+        setCustomerDetails(fullName: details.fullName, emailAddress: details.emailAddress, mobilePhone: details.mobilePhone)
+    }
+
+    /// The details form was skipped: chat without details, and don't ask again until the app restarts.
+    static func skipDetails() {
+        guard let (target, assistantId) = lock.withLock({ session.map { ($0, $0.config.assistantId) } }) else { return }
+        markSkipped(assistantId)
+        continueAfterDetails(target)
+    }
+
+    /// Leaves the details form: sends the held-back `firstCustomerMessage` and refreshes the chat.
+    private static func continueAfterDetails(_ target: Session) {
+        let first = lock.withLock { () -> String? in
+            target.needsDetails = false
+            defer { target.pendingFirst = nil }
+            return session === target ? target.pendingFirst : nil
+        }
+        if let first { sendFirstMessage(target, first) }
+        notifyChange()
+    }
+
+    // Details typed into the form are remembered on the device (UserDefaults) so returning visitors aren't asked
+    // again; a skip is remembered in memory, for this run of the app only.
+
+    /// Test seam: the UserDefaults the saved details live in (`.standard` when nil).
+    static var storageForTesting: UserDefaults?
+    private static var storage: UserDefaults { storageForTesting ?? .standard }
+    private static var skipped = Set<String>()
+
+    static func detailsKey(_ assistantId: String) -> String { "figochat.details.\(assistantId)" }
+
+    private static func savedDetails(_ assistantId: String) -> FigoCustomerDetails? {
+        guard let data = storage.data(forKey: detailsKey(assistantId)),
+              let details = try? JSONDecoder().decode(FigoCustomerDetails.self, from: data),
+              !details.isEmpty
+        else { return nil }
+        return details
+    }
+
+    private static func saveDetails(_ details: FigoCustomerDetails, for assistantId: String) {
+        guard let data = try? JSONEncoder().encode(details) else { return }
+        storage.set(data, forKey: detailsKey(assistantId))
+    }
+
+    static func hasSkippedDetails(_ assistantId: String) -> Bool { lock.withLock { skipped.contains(assistantId) } }
+
+    private static func markSkipped(_ assistantId: String) {
+        _ = lock.withLock { skipped.insert(assistantId) }
+    }
+
+    private static func forgetDetails(_ assistantId: String) {
+        storage.removeObject(forKey: detailsKey(assistantId))
+        _ = lock.withLock { skipped.remove(assistantId) }
+    }
+
+    /// Test seam: forgets every skip, like a fresh app run.
+    static func forgetSkipsForTesting() {
+        lock.withLock { skipped.removeAll() }
     }
 
     /// The API client, for apps that want to build their own UI.
@@ -132,12 +257,17 @@ public enum FigoChat {
         notifyChange()
     }
 
-    /// Clears the configuration, e.g. when the user signs out.
+    /// Clears the configuration, e.g. when the user signs out. Details a visitor typed into the details form (and a
+    /// skip) are forgotten too.
     public static func logout() {
-        lock.withLock {
-            session = nil
-            _conversation += 1
+        let assistantId = lock.withLock { () -> String? in
+            defer {
+                session = nil
+                _conversation += 1
+            }
+            return session?.config.assistantId
         }
+        if let assistantId { forgetDetails(assistantId) }
         notifyChange()
     }
 
