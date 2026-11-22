@@ -226,7 +226,8 @@ public enum FigoChat {
         get throws { try requireSession().realtime }
     }
 
-    /// The assistant's display details (name, persona, waiting message, intro message), or nil until they have
+    /// The assistant's display details (name, persona, waiting and intro messages, disclaimer, company terms and
+    /// privacy policy), or nil until they have
     /// loaded. They're fetched by `initialize`.
     public static var assistantInfo: FigoAssistantInfo? { lock.withLock { session?.assistant } }
 

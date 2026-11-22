@@ -5,7 +5,7 @@ import Foundation
 ///  - POST /api/v1/stt                            speech to text (multipart, field `audio`)
 ///  - POST /api/v1/cdn/upload/ocr/{assistantId}   upload files to the CDN (images are OCR'd)
 ///  - GET  /api/v1/realtime/config                public Pusher settings for live agent messages
-///  - GET  /api/v1/sdk/assistant/{assistantId}     the assistant's name, persona, waiting and intro messages
+///  - GET  /api/v1/sdk/assistant/{assistantId}     the assistant's name, persona, messages and legal links
 public final class FigoChatClient {
     private let config: FigoChatConfig
     /// Name, email and phone sent with messages; `FigoChat.setCustomerDetails` changes them. Guarded by `lock`.
@@ -122,7 +122,8 @@ public final class FigoChatClient {
         return urls
     }
 
-    /// The assistant's display details: name, persona, waiting message and intro message.
+    /// The assistant's display details: name, persona, waiting message, intro message, disclaimer and the company's
+    /// terms and privacy policy.
     public func getAssistant() async throws -> FigoAssistantInfo {
         let (json, _) = try await perform(makeRequest(["api", "v1", "sdk", "assistant", config.assistantId], method: "GET"))
         let data = json["responseData"] as? [String: Any] ?? [:]
@@ -130,7 +131,11 @@ public final class FigoChatClient {
             assistantName: data["assistantName"] as? String,
             persona: data["persona"] as? String,
             waitingMessage: data["waitingMessage"] as? String,
-            introMessage: data["introMessage"] as? String
+            introMessage: data["introMessage"] as? String,
+            disclaimerMessage: data["disclaimerMessage"] as? String,
+            company: (data["company"] as? [String: Any]).map {
+                FigoCompanyInfo(termsAndCondition: $0["termsAndCondition"] as? String, privacyPolicy: $0["privacyPolicy"] as? String)
+            }
         )
     }
 

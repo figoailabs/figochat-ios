@@ -30,8 +30,8 @@ public struct FigoChatConfig: CustomStringConvertible {
     /// true (the default) shows a details form (name, email, phone) before the chat when none of the three were
     /// passed and the visitor hasn't given them before.
     public let askForDetails: Bool
-    /// Country preselected in the details form's phone field, as an ISO code such as NG or GB; nil uses the
-    /// device region, then NG.
+    /// Country preselected in the details form's phone field, as an ISO code such as NG or GB (trimmed, any case);
+    /// nil or an unknown code preselects Nigeria (NG).
     public let defaultCountry: String?
 
     public var description: String { "FigoChatConfig(assistantId: \(assistantId), baseURL: \(baseURL), apiKey: ***)" }
@@ -64,19 +64,75 @@ public struct FigoCustomerDetails: Codable, Equatable, Sendable {
 
 /// Display details of the assistant, from `GET /api/v1/sdk/assistant/{assistantId}`. The chat header shows
 /// `persona` (or `assistantName`), the first bubble shows `introMessage`, and `waitingMessage` is shown on the left
-/// while a reply is being prepared. Any field may be nil.
+/// while a reply is being prepared. `disclaimerMessage` is shown above the footer, and when the company has both
+/// terms and a privacy policy the details form asks the visitor to agree to them. Any field may be nil.
 public struct FigoAssistantInfo: Equatable {
     public let assistantName: String?
     public let persona: String?
     public let waitingMessage: String?
     /// HTML, rendered like an assistant reply.
     public let introMessage: String?
+    /// Short notice such as "AI can make mistakes. Double-check sensitive information", shown in small grey text
+    /// above the "Powered by Figo AI Labs" footer.
+    public let disclaimerMessage: String?
+    /// The company's legal links; nil when the API didn't return them.
+    public let company: FigoCompanyInfo?
 
-    public init(assistantName: String? = nil, persona: String? = nil, waitingMessage: String? = nil, introMessage: String? = nil) {
+    public init(
+        assistantName: String? = nil,
+        persona: String? = nil,
+        waitingMessage: String? = nil,
+        introMessage: String? = nil,
+        disclaimerMessage: String? = nil,
+        company: FigoCompanyInfo? = nil
+    ) {
         self.assistantName = assistantName
         self.persona = persona
         self.waitingMessage = waitingMessage
         self.introMessage = introMessage
+        self.disclaimerMessage = disclaimerMessage
+        self.company = company
+    }
+
+    /// The disclaimer trimmed, or nil when there is none to show.
+    var disclaimer: String? {
+        disclaimerMessage.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The terms and privacy policy the details form asks the visitor to agree to: only when both are set.
+    var consentLinks: FigoConsentLinks? {
+        let trim: (String?) -> String? = { $0.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 } }
+        guard let terms = trim(company?.termsAndCondition), let privacy = trim(company?.privacyPolicy) else { return nil }
+        return FigoConsentLinks(terms: terms, privacy: privacy)
+    }
+}
+
+/// The assistant's company, as returned with the assistant details.
+public struct FigoCompanyInfo: Equatable {
+    /// Terms and conditions, usually a URL.
+    public let termsAndCondition: String?
+    /// Privacy policy, usually a URL.
+    public let privacyPolicy: String?
+
+    public init(termsAndCondition: String? = nil, privacyPolicy: String? = nil) {
+        self.termsAndCondition = termsAndCondition
+        self.privacyPolicy = privacyPolicy
+    }
+}
+
+/// Terms and privacy policy (trimmed, non-empty) the visitor must agree to before starting the chat.
+struct FigoConsentLinks: Equatable {
+    let terms: String
+    let privacy: String
+
+    var termsURL: URL? { Self.webURL(terms) }
+    var privacyURL: URL? { Self.webURL(privacy) }
+
+    /// The value as a URL when it is an http(s) link; nil otherwise, so it is shown as plain text.
+    static func webURL(_ value: String) -> URL? {
+        guard let url = URL(string: value), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              url.host?.isEmpty == false else { return nil }
+        return url
     }
 }
 

@@ -6,6 +6,15 @@ Native iOS (Swift, SwiftUI) SDK for chatting with a Figo AI assistant. Users can
 - **Swift Package Manager**
 - **Depends on:** [PusherSwift](https://github.com/pusher/pusher-websocket-swift)
 
+## What's new
+
+### 2.3.0
+
+- **Consent checkbox:** when the company has both Terms and conditions and a Privacy policy set in the FigoChat admin, the details form shows "I have read and agreed to the Terms, conditions, and privacy policy" with a checkbox. "Terms, conditions" and "privacy policy" open their pages (when they're web links), and **Start chat** stays disabled until the box is checked. **Skip** still works. With only one of the two set, there's no checkbox.
+- **Disclaimer:** the chatbot's disclaimer (for example "AI can make mistakes. Double-check sensitive information") is shown in small grey text above the "Powered by Figo AI Labs" footer, on the chat and the details form.
+- **Nigeria is the default country:** the phone field preselects `defaultCountry` (an ISO code such as `GB`, any case) when it's valid, otherwise Nigeria (`NG`). The device region is no longer used.
+- `FigoAssistantInfo` has new `disclaimerMessage` and `company` (`termsAndCondition`, `privacyPolicy`) fields.
+
 ## Install
 
 The SDK is open source at [github.com/figoailabs/figochat-ios](https://github.com/figoailabs/figochat-ios).
@@ -15,7 +24,7 @@ In Xcode, choose **File → Add Package Dependencies…**, enter `https://github
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/figoailabs/figochat-ios.git", from: "2.2.0"),
+    .package(url: "https://github.com/figoailabs/figochat-ios.git", from: "2.3.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "FigoChat", package: "figochat-ios")]),
@@ -52,7 +61,7 @@ The header title, welcome message and waiting message come from the chatbot's se
 
 `initialize` throws `FigoChatError` with code `CONFIG` if a required value is empty or the color isn't hex.
 
-**Users you don't know:** leave `fullName`, `emailAddress` and `mobilePhone` out and the chat asks for them with a short form (name, email, phone with a searchable country-code picker) that the user can skip. Submitted details are used as if passed to `initialize` and remembered on the device (UserDefaults); `logout` forgets them. Set `askForDetails: false` to skip the form, `defaultCountry` to preselect a country, and call `setCustomerDetails` when the user signs in later.
+**Users you don't know:** leave `fullName`, `emailAddress` and `mobilePhone` out and the chat asks for them with a short form (name, email, phone with a searchable country-code picker) that the user can skip. Submitted details are used as if passed to `initialize` and remembered on the device (UserDefaults); `logout` forgets them. Set `askForDetails: false` to skip the form, `defaultCountry` to preselect a country (ISO code; Nigeria when unset or unknown), and call `setCustomerDetails` when the user signs in later. If the company has both Terms and conditions and a Privacy policy, the form asks the user to agree to them before **Start chat**. The chatbot's disclaimer, if set, appears above the footer.
 
 ## Show the chat
 

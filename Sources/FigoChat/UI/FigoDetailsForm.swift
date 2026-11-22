@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// State and validation behind the details form shown to anonymous visitors before the chat.
@@ -13,10 +14,24 @@ final class FigoDetailsFormModel: ObservableObject {
     @Published private(set) var error: String?
     /// The field the error is about, so the view can focus it.
     @Published private(set) var errorField: Field?
+    /// The consent checkbox ("I have read and agreed to the Terms, conditions, and privacy policy").
+    @Published var agreed = false
+    /// Terms and privacy policy to agree to; nil (no checkbox) unless the assistant details carry both. The details
+    /// can load after the form is shown, so this follows `FigoChat.changes`.
+    @Published private(set) var consent: FigoConsentLinks?
+
+    private var changes: AnyCancellable?
 
     init(defaultCountry: String?) {
         country = FigoCountry.preferred(defaultCountry)
+        consent = FigoChat.assistantInfo?.consentLinks
+        changes = FigoChat.changes.sink { [weak self] in
+            self?.consent = FigoChat.assistantInfo?.consentLinks
+        }
     }
+
+    /// "Start chat" is enabled once the visitor has agreed, when there is something to agree to.
+    var canSubmit: Bool { consent == nil || agreed }
 
     /// "🇳🇬 +234", as shown on the country button.
     var countryLabel: String { country.label }
@@ -38,6 +53,7 @@ final class FigoDetailsFormModel: ObservableObject {
 
     /// "Start chat": validates, then saves the details for this assistant and starts the chat with them.
     func submit() {
+        guard canSubmit else { return }
         let (details, message, field) = Self.validate(fullName: fullName, emailAddress: emailAddress, mobilePhone: mobilePhone, country: country)
         error = message
         errorField = field
@@ -124,6 +140,10 @@ struct FigoDetailsFormView: View {
                     }
                 }
 
+                if let consent = form.consent {
+                    FigoConsentRow(consent: consent, agreed: $form.agreed, primary: primary)
+                }
+
                 if let error = form.error {
                     Text(error)
                         .font(.system(size: 13))
@@ -140,8 +160,10 @@ struct FigoDetailsFormView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 13)
                         .background(RoundedRectangle(cornerRadius: 12).fill(primary))
+                        .opacity(form.canSubmit ? 1 : 0.5)
                 }
                 .buttonStyle(.plain)
+                .disabled(!form.canSubmit)
 
                 Button {
                     focused = nil
@@ -168,6 +190,55 @@ struct FigoDetailsFormView: View {
             Text(title).font(.system(size: 13, weight: .medium)).foregroundColor(textDark)
             content()
         }
+    }
+}
+
+/// Checkbox for agreeing to the company's terms and privacy policy. "Terms, conditions" and "privacy policy" open
+/// their pages when they are http(s) links, like the "Figo AI Labs" link in the footer.
+struct FigoConsentRow: View {
+    let consent: FigoConsentLinks
+    @Binding var agreed: Bool
+    let primary: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Button { agreed.toggle() } label: {
+                Image(systemName: agreed ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 20))
+                    .foregroundColor(agreed ? primary : textMuted)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(FigoConsentRow.label)
+            .accessibilityValue(agreed ? "Checked" : "Unchecked")
+            .accessibilityAddTraits(agreed ? [.isButton, .isSelected] : .isButton)
+
+            Text(FigoConsentRow.text(consent, linkColor: primary))
+                .font(.system(size: 13))
+                .foregroundColor(textDark)
+                .tint(primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 2)
+        }
+    }
+
+    static let label = "I have read and agreed to the Terms, conditions, and privacy policy"
+
+    /// The label, with "Terms, conditions" and "privacy policy" linked when their values are http(s) URLs.
+    static func text(_ consent: FigoConsentLinks, linkColor: Color) -> AttributedString {
+        func part(_ title: String, _ url: URL?) -> AttributedString {
+            var part = AttributedString(title)
+            if let url {
+                part.link = url
+                part.foregroundColor = linkColor
+                part.underlineStyle = .single
+            }
+            return part
+        }
+        return AttributedString("I have read and agreed to the ") + part("Terms, conditions", consent.termsURL)
+            + AttributedString(", and ") + part("privacy policy", consent.privacyURL)
     }
 }
 

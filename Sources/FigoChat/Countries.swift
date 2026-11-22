@@ -27,13 +27,13 @@ struct FigoCountry: Identifiable, Hashable {
     .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 
     static func find(_ code: String?) -> FigoCountry? {
-        guard let code = code?.trimmingCharacters(in: .whitespaces).uppercased(), !code.isEmpty else { return nil }
+        guard let code = code?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(), !code.isEmpty else { return nil }
         return all.first { $0.code == code }
     }
 
-    /// The country to preselect: the one given, else the device region, else Nigeria.
+    /// The country to preselect: the one given (an ISO code, any case) when it is known, else Nigeria.
     static func preferred(_ code: String?) -> FigoCountry {
-        find(code) ?? find(Locale.current.region?.identifier) ?? find("NG")!
+        find(code) ?? find("NG")!
     }
 
     static func flag(of code: String) -> String {

@@ -78,6 +78,16 @@ public struct FigoChatView: View {
                 conversation(config: config, primary: primary, onPrimary: onPrimary)
             }
 
+            if let disclaimer = vm.assistant?.disclaimer {
+                Text(disclaimer)
+                    .font(.system(size: 10))
+                    .foregroundColor(Color(hex: "#9AA0A6"))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+            }
+
             Text(poweredBy)
                 .font(.system(size: 11))
                 .foregroundColor(Color(hex: "#9AA0A6"))

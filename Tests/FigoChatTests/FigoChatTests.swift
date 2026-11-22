@@ -226,6 +226,27 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertNil(FigoChat.firstExchange)
     }
 
+    func testAssistantDetailsDecodeTheDisclaimerAndCompanyLinksAndTolerateNulls() async throws {
+        FakeAPI.reset(assistant: [
+            "persona": "Dave", "disclaimerMessage": "AI can make mistakes. Double-check sensitive information",
+            "company": ["termsAndCondition": "https://shop.example.com/terms", "privacyPolicy": NSNull()],
+        ])
+        try initialize()
+        await waitUntil { FigoChat.assistantInfo != nil }
+        XCTAssertEqual(FigoChat.assistantInfo, FigoAssistantInfo(
+            persona: "Dave", disclaimerMessage: "AI can make mistakes. Double-check sensitive information",
+            company: FigoCompanyInfo(termsAndCondition: "https://shop.example.com/terms", privacyPolicy: nil)
+        ))
+        XCTAssertEqual(FigoChat.assistantInfo?.disclaimer, "AI can make mistakes. Double-check sensitive information")
+
+        FigoChat.logout()
+        FakeAPI.reset(assistant: ["persona": "Dave", "disclaimerMessage": NSNull(), "company": NSNull()])
+        try initialize()
+        await waitUntil { FigoChat.assistantInfo != nil }
+        XCTAssertEqual(FigoChat.assistantInfo, FigoAssistantInfo(persona: "Dave"))
+        XCTAssertNil(FigoChat.assistantInfo?.disclaimer)
+    }
+
     func testFirstCustomerMessageIsSentOnInitializeKeepsTheThreadAndRaisesBothEvents() async throws {
         var events: [String] = []
         let token = FigoChat.addListener(onMessageSent: { events.append("sent: \($0)") }, onMessageReceived: { events.append("received: \($0)") })
@@ -380,6 +401,66 @@ final class DetailsFormTests: XCTestCase {
             "question": "Where is my order?", "fullName": "Ada Lovelace", "emailAddress": "ada@example.com", "phoneNumber": "+447700900123",
         ])
         XCTAssertEqual(try savedDetails(), details)
+    }
+
+    func testTheCountryIsTheDefaultCountryWhenKnownElseNigeria() {
+        XCTAssertEqual(FigoCountry.preferred(nil).code, "NG")
+        XCTAssertEqual(FigoCountry.preferred("").code, "NG")
+        XCTAssertEqual(FigoCountry.preferred("XX").code, "NG")
+        XCTAssertEqual(FigoCountry.preferred(" gb \n").code, "GB")
+        XCTAssertEqual(FigoDetailsFormModel(defaultCountry: nil).country.code, "NG")
+        XCTAssertEqual(FigoDetailsFormModel(defaultCountry: "us").country.code, "US")
+    }
+
+    func testConsentIsAskedOnlyWhenTheCompanyHasBothTermsAndAPrivacyPolicy() {
+        func links(_ terms: String?, _ privacy: String?) -> FigoConsentLinks? {
+            FigoAssistantInfo(company: FigoCompanyInfo(termsAndCondition: terms, privacyPolicy: privacy)).consentLinks
+        }
+        XCTAssertNil(FigoAssistantInfo().consentLinks)
+        XCTAssertNil(links("https://x.io/terms", nil))
+        XCTAssertNil(links(nil, "https://x.io/privacy"))
+        XCTAssertNil(links("https://x.io/terms", "   "))
+        XCTAssertEqual(links(" https://x.io/terms ", "Our privacy policy"), FigoConsentLinks(terms: "https://x.io/terms", privacy: "Our privacy policy"))
+
+        let consent = FigoConsentLinks(terms: "https://x.io/terms", privacy: "Our privacy policy")
+        XCTAssertEqual(consent.termsURL, URL(string: "https://x.io/terms"))
+        XCTAssertNil(consent.privacyURL, "not a link: plain text")
+        XCTAssertNil(FigoConsentLinks.webURL("javascript:alert(1)"))
+        XCTAssertNil(FigoConsentLinks.webURL("mailto:a@b.c"))
+
+        let text = FigoConsentRow.text(consent, linkColor: .orange)
+        XCTAssertEqual(String(text.characters), "I have read and agreed to the Terms, conditions, and privacy policy")
+        XCTAssertEqual(FigoConsentRow.label, String(text.characters))
+        let linked = text.runs.compactMap { run in run.link.map { (String(text[run.range].characters), $0) } }
+        XCTAssertEqual(linked.map(\.0), ["Terms, conditions"])
+        XCTAssertEqual(linked.map(\.1), [URL(string: "https://x.io/terms")!])
+    }
+
+    func testStartChatWaitsForConsentThatArrivesWithTheAssistantDetails() async throws {
+        FakeAPI.reset(assistant: ["persona": "Dave", "company": ["termsAndCondition": "https://x.io/terms", "privacyPolicy": "https://x.io/privacy"]])
+        try initializeAnonymous()
+        let form = FigoDetailsFormModel(defaultCountry: nil) // shown before the details load
+        XCTAssertNil(form.consent)
+        await waitUntil { form.consent != nil }
+        XCTAssertEqual(form.consent, FigoConsentLinks(terms: "https://x.io/terms", privacy: "https://x.io/privacy"))
+        XCTAssertFalse(form.canSubmit)
+
+        try fillAndSubmit(form)
+        XCTAssertTrue(FigoChat.needsDetails, "not started without consent")
+        form.agreed = true
+        XCTAssertTrue(form.canSubmit)
+        form.submit()
+        XCTAssertFalse(FigoChat.needsDetails)
+    }
+
+    func testSkipStaysAvailableWithoutConsent() async throws {
+        FakeAPI.reset(assistant: ["company": ["termsAndCondition": "https://x.io/terms", "privacyPolicy": "https://x.io/privacy"]])
+        try initializeAnonymous()
+        await waitUntil { FigoChat.assistantInfo != nil }
+        let form = FigoDetailsFormModel(defaultCountry: nil)
+        XCTAssertFalse(form.canSubmit)
+        form.skip()
+        XCTAssertFalse(FigoChat.needsDetails)
     }
 
     func testAReturningVisitorIsNotAskedAgainAndLogoutForgetsTheirDetails() async throws {
