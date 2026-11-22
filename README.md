@@ -15,7 +15,7 @@ In Xcode, choose **File → Add Package Dependencies…**, enter `https://github
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/figoailabs/figochat-ios.git", from: "2.0.0"),
+    .package(url: "https://github.com/figoailabs/figochat-ios.git", from: "2.2.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "FigoChat", package: "figochat-ios")]),

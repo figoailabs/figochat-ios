@@ -317,11 +317,14 @@ private struct MessageBubble: View {
             VStack(alignment: mine ? .trailing : .leading, spacing: 3) {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(message.attachments) { AttachmentView(attachment: $0, color: textColor) }
-                    Text(richText(mine ? plainToRuns(message.text) : htmlToRuns(message.text), linkColor: mine ? onPrimary : primary))
-                        .font(.system(size: 15))
-                        .foregroundColor(textColor)
-                        .tint(mine ? onPrimary : primary)
-                        .textSelection(.enabled)
+                    // files sent on their own show as just the files
+                    if !message.text.isEmpty {
+                        Text(richText(mine ? plainToRuns(message.text) : htmlToRuns(message.text), linkColor: mine ? onPrimary : primary))
+                            .font(.system(size: 15))
+                            .foregroundColor(textColor)
+                            .tint(mine ? onPrimary : primary)
+                            .textSelection(.enabled)
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)

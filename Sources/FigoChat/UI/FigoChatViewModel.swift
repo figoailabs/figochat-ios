@@ -164,7 +164,8 @@ final class FigoChatViewModel: ObservableObject {
         Task {
             defer { replying = false }
             do {
-                let reply = try await FigoChat.client.sendMessage(message.text, attachmentURLs: message.attachments.map(\.url))
+                let question = message.text.isEmpty ? filesQuestion(message.attachments.count) : message.text
+                let reply = try await FigoChat.client.sendMessage(question, attachmentURLs: message.attachments.map(\.url))
                 update(message.id) { $0.status = .sent }
                 FigoChat.emit(.messageSent, message.text)
                 // in live agent mode the API relays the message to the agent and answers with nothing;
@@ -198,7 +199,8 @@ final class FigoChatViewModel: ObservableObject {
         let message = FigoChatMessage(
             id: newId(),
             role: .user,
-            text: text.isEmpty ? (attachments.count > 1 ? "Please review the attached files." : "Please review the attached file.") : text,
+            // files sent on their own show as just the files; the API still gets a short question (see ask)
+            text: text,
             attachments: attachments,
             status: .sending
         )
@@ -369,4 +371,9 @@ final class FigoChatViewModel: ObservableObject {
             AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) }
         }
     }
+}
+
+/// Question sent to the API with files the user sent without text. It isn't shown in the chat.
+func filesQuestion(_ count: Int) -> String {
+    count > 1 ? "Please review the attached files." : "Please review the attached file."
 }
