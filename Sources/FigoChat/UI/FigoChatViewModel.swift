@@ -33,6 +33,9 @@ final class FigoChatViewModel: ObservableObject {
     @Published private(set) var recordingSeconds = 0
     @Published private(set) var transcribing = false
     @Published private(set) var notice: String?
+    /// `messages` start with the thread's history, fetched when the screen opened on an active thread; the first
+    /// exchange is part of it, so it isn't shown separately.
+    @Published private(set) var restoredHistory = false
 
     var onError: ((FigoChatError) -> Void)?
 
@@ -43,6 +46,7 @@ final class FigoChatViewModel: ObservableObject {
     private var noticeTask: Task<Void, Never>?
     private var changes: AnyCancellable?
     private var conversation = FigoChat.conversation
+    private var restoring = false
 
     init() {
         assistant = FigoChat.assistantInfo
@@ -57,6 +61,7 @@ final class FigoChatViewModel: ObservableObject {
             if self.conversation != FigoChat.conversation {
                 self.conversation = FigoChat.conversation
                 self.messages.removeAll()
+                self.restoredHistory = false
                 self.subscription?.stop()
                 self.subscription = nil
             }
@@ -80,13 +85,14 @@ final class FigoChatViewModel: ObservableObject {
         return text.isEmpty ? nil : text
     }
 
-    /// What the screen shows: the intro message, the first exchange, then the messages sent from this screen.
+    /// What the screen shows: the intro message, the first exchange (unless the restored history has it), then the
+    /// messages: the restored history and those sent from this screen.
     var displayMessages: [FigoChatMessage] {
         var all: [FigoChatMessage] = []
         if let intro = assistant?.introMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !intro.isEmpty {
             all.append(FigoChatMessage(id: "welcome", role: .assistant, text: intro, createdAt: .distantPast))
         }
-        if let first {
+        if let first, !restoredHistory {
             all.append(first.message)
             if let reply = first.reply { all.append(reply) }
             if let error = first.error {
@@ -119,7 +125,28 @@ final class FigoChatViewModel: ObservableObject {
 
     // MARK: - Lifecycle (called by the view)
 
-    func appear() { syncRealtime() }
+    func appear() {
+        FigoChat.expireSessionIfNeeded()
+        syncRealtime()
+        restoreHistory()
+    }
+
+    /// Opened on an active thread (from earlier in this app run, or the `threadId` passed to `initialize`) with no
+    /// messages on screen: shows the thread's messages. A failure leaves the chat as it is.
+    func restoreHistory() {
+        guard !restoring, messages.isEmpty, FigoChat.isInitialized, !FigoChat.needsDetails,
+              let threadId = FigoChat.threadId, let client = try? FigoChat.client else { return }
+        restoring = true
+        let conversation = self.conversation
+        Task {
+            defer { restoring = false }
+            guard let history = try? await client.getMessages(threadId: threadId), !history.isEmpty else { return }
+            // only if nothing changed meanwhile (a new conversation, a message sent from this screen)
+            guard self.conversation == conversation, FigoChat.threadId == threadId, messages.isEmpty else { return }
+            messages = history
+            restoredHistory = true
+        }
+    }
 
     func disappear() {
         subscription?.stop()
@@ -145,6 +172,7 @@ final class FigoChatViewModel: ObservableObject {
             onMessage: { [weak self] html in
                 guard let self else { return }
                 self.messages.append(FigoChatMessage(id: self.newId(), role: .assistant, text: html))
+                FigoChat.noteActivity()
                 FigoChat.emit(.messageReceived, htmlToText(html))
             },
             onError: { [weak self] error in self?.report(error) }
@@ -190,6 +218,9 @@ final class FigoChatViewModel: ObservableObject {
         let text = (textOverride ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
         let ready = pending.filter { !$0.uploading && !$0.failed && $0.url != nil }
         if waiting || (text.isEmpty && ready.isEmpty) { return }
+        // an hour without activity ends the session: the chat starts over (and an anonymous visitor is asked for
+        // their details again; what they typed stays in the input)
+        if FigoChat.expireSessionIfNeeded(), FigoChat.needsDetails { return }
         if pending.contains(where: \.uploading) {
             showNotice("Please wait, your files are still uploading.")
             return
@@ -212,6 +243,7 @@ final class FigoChatViewModel: ObservableObject {
 
     func retry(_ message: FigoChatMessage) {
         if waiting { return }
+        if FigoChat.expireSessionIfNeeded() { return } // the message went with the expired conversation
         if message.id == first?.message.id {
             FigoChat.retryFirstMessage()
             return

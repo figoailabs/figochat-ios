@@ -18,6 +18,15 @@ public enum FigoChat {
         var needsDetails = false
         /// `firstCustomerMessage` held back until the details form is submitted or skipped. Guarded by `lock`.
         var pendingFirst: String?
+        /// `initialize` got no name, email or phone (and `setCustomerDetails` hasn't been called since). Guarded by `lock`.
+        var anonymous = false
+        /// The current details were typed into the details form. Guarded by `lock`.
+        var formDetails = false
+        /// The details form was skipped. Guarded by `lock`.
+        var skipped = false
+        /// Last message sent or reply / live agent message received; the conversation session ends an hour later.
+        /// In memory only. Guarded by `lock`.
+        var lastActivity: Date?
 
         init(config: FigoChatConfig) {
             self.config = config
@@ -42,8 +51,12 @@ public enum FigoChat {
     /// again to switch user or settings.
     ///
     /// `fullName`, `emailAddress` and `mobilePhone` are optional: when all three are empty and `askForDetails` is
-    /// true, the chat first shows a form asking for them (unless this visitor already filled it in for this
-    /// assistant, or skipped it since the app started). `firstCustomerMessage` is sent once the form is done.
+    /// true, the chat first shows a form asking for them (unless this visitor filled it in or skipped it during the
+    /// current conversation session). `firstCustomerMessage` is sent once the form is done.
+    ///
+    /// A conversation session is the thread and the details typed into the form. It lasts one hour from the last
+    /// message sent or received and is kept in memory only, so it ends when the app's process does. An anonymous
+    /// visitor's session carries over when `initialize` is called again within that hour.
     public static func initialize(
         apiKey: String,
         fullName: String = "",
@@ -71,14 +84,31 @@ public enum FigoChat {
             throw FigoChatError("FigoChat.initialize: primaryColor must be a hex color such as #F97316.", code: "CONFIG")
         }
 
-        // anonymous visitor: reuse the details they gave before, or ask for them (unless they skipped this run)
+        // versions before 2.4 kept form details on the device indefinitely: remove them
+        removeLegacyDetails(trim(assistantId))
+
+        // anonymous visitor: reuse the session they started in this app run (details, skip, thread) for an hour
+        let now = clock()
         var details = FigoCustomerDetails(fullName: trim(fullName), emailAddress: trim(emailAddress), mobilePhone: trim(mobilePhone))
+        let anonymous = details.isEmpty
+        let stored = lock.withLock { () -> StoredConversation? in
+            guard anonymous, let stored = conversations[trim(assistantId)] else { return nil }
+            if isExpired(stored.lastActivity, now: now) {
+                conversations[trim(assistantId)] = nil
+                return nil
+            }
+            return stored
+        }
         var needsDetails = false
-        if details.isEmpty && askForDetails {
-            if let saved = savedDetails(trim(assistantId)) {
+        var formDetails = false
+        var skipped = false
+        if anonymous && askForDetails {
+            if let saved = stored?.details, !saved.isEmpty {
                 details = saved
+                formDetails = true
             } else {
-                needsDetails = !hasSkippedDetails(trim(assistantId))
+                skipped = stored?.skipped ?? false
+                needsDetails = !skipped
             }
         }
 
@@ -102,10 +132,24 @@ public enum FigoChat {
         let newSession = Session(config: config)
         let first = firstCustomerMessage.map(trim).flatMap { $0.isEmpty ? nil : $0 }
         newSession.needsDetails = needsDetails
+        newSession.anonymous = anonymous
+        newSession.formDetails = formDetails
+        newSession.skipped = skipped
         if needsDetails { newSession.pendingFirst = first }
+        if let threadId, !trim(threadId).isEmpty {
+            // the app resumes a conversation: it's active from now
+            newSession.lastActivity = now
+        } else if let stored {
+            newSession.lastActivity = stored.lastActivity
+            if !needsDetails, let thread = stored.threadId { newSession.client.restoreThread(thread) }
+        }
+        newSession.client.setOnActivity { [weak newSession] in
+            if let newSession { recordActivity(newSession) }
+        }
         lock.withLock {
             session = newSession
             _conversation += 1
+            storeConversation(newSession)
         }
         loadAssistant(newSession)
         if let first, !needsDetails { sendFirstMessage(newSession, first) }
@@ -129,14 +173,30 @@ public enum FigoChat {
     /// `initialize`.
     public static func setCustomerDetails(fullName: String? = nil, emailAddress: String? = nil, mobilePhone: String? = nil) {
         guard let target = lock.withLock({ session }) else { return }
+        applyDetails(target, fullName: fullName, emailAddress: emailAddress, mobilePhone: mobilePhone, fromForm: false)
+    }
+
+    private static func applyDetails(_ target: Session, fullName: String?, emailAddress: String?, mobilePhone: String?, fromForm: Bool) {
         let trim: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let details = lock.withLock { () -> FigoCustomerDetails in
             target.config.fullName = trim(fullName ?? target.config.fullName)
             target.config.emailAddress = trim(emailAddress ?? target.config.emailAddress)
             target.config.mobilePhone = trim(mobilePhone ?? target.config.mobilePhone)
-            return FigoCustomerDetails(
+            let details = FigoCustomerDetails(
                 fullName: target.config.fullName, emailAddress: target.config.emailAddress, mobilePhone: target.config.mobilePhone
             )
+            if fromForm {
+                // the form starts the conversation session
+                target.formDetails = true
+                target.lastActivity = clock()
+            } else if !details.isEmpty {
+                // the app knows who this is now: the conversation is no longer an anonymous visitor's
+                target.anonymous = false
+                target.formDetails = false
+                if session === target { conversations[target.config.assistantId] = nil }
+            }
+            storeConversation(target)
+            return details
         }
         target.client.setCustomerDetails(details)
         continueAfterDetails(target)
@@ -153,17 +213,20 @@ public enum FigoChat {
     /// The chat shows the details form instead of the conversation.
     static var needsDetails: Bool { lock.withLock { session?.needsDetails ?? false } }
 
-    /// The details form was submitted: remember the details for this assistant and use them.
+    /// The details form was submitted: use the details for this conversation session (in memory only).
     static func submitDetails(_ details: FigoCustomerDetails) {
-        guard let assistantId = lock.withLock({ session?.config.assistantId }) else { return }
-        saveDetails(details, for: assistantId)
-        setCustomerDetails(fullName: details.fullName, emailAddress: details.emailAddress, mobilePhone: details.mobilePhone)
+        guard let target = lock.withLock({ session }) else { return }
+        applyDetails(target, fullName: details.fullName, emailAddress: details.emailAddress, mobilePhone: details.mobilePhone, fromForm: true)
     }
 
-    /// The details form was skipped: chat without details, and don't ask again until the app restarts.
+    /// The details form was skipped: chat without details, and don't ask again during this conversation session.
     static func skipDetails() {
-        guard let (target, assistantId) = lock.withLock({ session.map { ($0, $0.config.assistantId) } }) else { return }
-        markSkipped(assistantId)
+        guard let target = lock.withLock({ session }) else { return }
+        lock.withLock {
+            target.skipped = true
+            target.lastActivity = clock()
+            storeConversation(target)
+        }
         continueAfterDetails(target)
     }
 
@@ -178,43 +241,123 @@ public enum FigoChat {
         notifyChange()
     }
 
-    // Details typed into the form are remembered on the device (UserDefaults) so returning visitors aren't asked
-    // again; a skip is remembered in memory, for this run of the app only.
+    // MARK: - Conversation session
 
-    /// Test seam: the UserDefaults the saved details live in (`.standard` when nil).
+    // A conversation session is the thread and the details typed into the form (or the skip). It lasts one hour
+    // from the last activity (a message sent, a reply or live agent message received) and lives in memory only:
+    // nothing is written to the device, so it ends with the app's process, like a closed browser tab.
+
+    /// How long a conversation session lasts after its last activity.
+    static let sessionLifetime: TimeInterval = 60 * 60
+
+    /// Test seam: the clock used for the session's activity and expiry.
+    static var clock: () -> Date = { Date() }
+
+    /// An anonymous visitor's session, kept for this app run so `initialize` can pick it up again.
+    private struct StoredConversation {
+        var details: FigoCustomerDetails?
+        var skipped = false
+        var threadId: String?
+        var lastActivity: Date?
+    }
+
+    /// By assistant id. Guarded by `lock`.
+    private static var conversations: [String: StoredConversation] = [:]
+
+    /// true when the session's last activity was at least `sessionLifetime` ago; false when there was none.
+    static func isExpired(_ lastActivity: Date?, now: Date) -> Bool {
+        guard let lastActivity else { return false }
+        return now.timeIntervalSince(lastActivity) >= sessionLifetime
+    }
+
+    /// Ends the conversation session if it has expired: forgets the thread, the form's details and the skip,
+    /// clears the first exchange and the chat's messages, and asks an anonymous visitor for their details again
+    /// (unless `askForDetails` is false). Returns whether it expired. Checked on `initialize`, when the chat
+    /// appears and before sending.
+    @discardableResult
+    static func expireSessionIfNeeded(now: Date? = nil) -> Bool {
+        guard let target = lock.withLock({ session }) else { return false }
+        let now = now ?? clock()
+        let details = lock.withLock { () -> FigoCustomerDetails? in
+            guard session === target, isExpired(target.lastActivity, now: now) else { return nil }
+            target.client.resetThread()
+            target.first = nil
+            target.pendingFirst = nil
+            target.lastActivity = nil
+            target.skipped = false
+            if target.formDetails {
+                target.config.fullName = ""
+                target.config.emailAddress = ""
+                target.config.mobilePhone = ""
+                target.formDetails = false
+            }
+            let details = FigoCustomerDetails(
+                fullName: target.config.fullName, emailAddress: target.config.emailAddress, mobilePhone: target.config.mobilePhone
+            )
+            target.needsDetails = target.anonymous && target.config.askForDetails && details.isEmpty
+            conversations[target.config.assistantId] = nil
+            _conversation += 1
+            return details
+        }
+        guard let details else { return false }
+        target.client.setCustomerDetails(details)
+        notifyChange()
+        return true
+    }
+
+    /// A live agent message arrived on the chat screen: the conversation session is active.
+    static func noteActivity() {
+        guard let target = lock.withLock({ session }) else { return }
+        recordActivity(target)
+    }
+
+    private static func recordActivity(_ target: Session) {
+        lock.withLock {
+            guard session === target else { return }
+            target.lastActivity = clock()
+            storeConversation(target)
+        }
+    }
+
+    /// Keeps an anonymous visitor's session for this app run. Call with `lock` held.
+    private static func storeConversation(_ target: Session) {
+        guard target.anonymous, session === target else { return }
+        conversations[target.config.assistantId] = StoredConversation(
+            details: target.formDetails ? FigoCustomerDetails(
+                fullName: target.config.fullName, emailAddress: target.config.emailAddress, mobilePhone: target.config.mobilePhone
+            ) : nil,
+            skipped: target.skipped,
+            threadId: target.client.threadId,
+            lastActivity: target.lastActivity
+        )
+    }
+
+    /// Test seam: the UserDefaults older versions saved form details in (`.standard` when nil).
     static var storageForTesting: UserDefaults?
     private static var storage: UserDefaults { storageForTesting ?? .standard }
-    private static var skipped = Set<String>()
 
+    /// Where versions before 2.4 saved the form's details.
     static func detailsKey(_ assistantId: String) -> String { "figochat.details.\(assistantId)" }
 
-    private static func savedDetails(_ assistantId: String) -> FigoCustomerDetails? {
-        guard let data = storage.data(forKey: detailsKey(assistantId)),
-              let details = try? JSONDecoder().decode(FigoCustomerDetails.self, from: data),
-              !details.isEmpty
-        else { return nil }
-        return details
+    private static func removeLegacyDetails(_ assistantId: String) {
+        storage.removeObject(forKey: detailsKey(assistantId))
     }
 
-    private static func saveDetails(_ details: FigoCustomerDetails, for assistantId: String) {
-        guard let data = try? JSONEncoder().encode(details) else { return }
-        storage.set(data, forKey: detailsKey(assistantId))
-    }
-
-    static func hasSkippedDetails(_ assistantId: String) -> Bool { lock.withLock { skipped.contains(assistantId) } }
-
-    private static func markSkipped(_ assistantId: String) {
-        _ = lock.withLock { skipped.insert(assistantId) }
+    static func hasSkippedDetails(_ assistantId: String) -> Bool {
+        lock.withLock {
+            if let session, session.config.assistantId == assistantId, session.skipped { return true }
+            return conversations[assistantId]?.skipped ?? false
+        }
     }
 
     private static func forgetDetails(_ assistantId: String) {
-        storage.removeObject(forKey: detailsKey(assistantId))
-        _ = lock.withLock { skipped.remove(assistantId) }
+        removeLegacyDetails(assistantId)
+        _ = lock.withLock { conversations.removeValue(forKey: assistantId) }
     }
 
-    /// Test seam: forgets every skip, like a fresh app run.
-    static func forgetSkipsForTesting() {
-        lock.withLock { skipped.removeAll() }
+    /// Test seam: forgets every conversation session, like a fresh app run.
+    static func forgetSessionsForTesting() {
+        lock.withLock { conversations.removeAll() }
     }
 
     /// The API client, for apps that want to build their own UI.
@@ -254,12 +397,13 @@ public enum FigoChat {
             session?.client.resetThread()
             session?.first = nil
             _conversation += 1
+            if let session { storeConversation(session) }
         }
         notifyChange()
     }
 
-    /// Clears the configuration, e.g. when the user signs out. Details a visitor typed into the details form (and a
-    /// skip) are forgotten too.
+    /// Clears the configuration, e.g. when the user signs out. The conversation session (thread, details a visitor
+    /// typed into the details form, a skip) is forgotten too.
     public static func logout() {
         let assistantId = lock.withLock { () -> String? in
             defer {

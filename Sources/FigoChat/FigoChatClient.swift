@@ -6,6 +6,7 @@ import Foundation
 ///  - POST /api/v1/cdn/upload/ocr/{assistantId}   upload files to the CDN (images are OCR'd)
 ///  - GET  /api/v1/realtime/config                public Pusher settings for live agent messages
 ///  - GET  /api/v1/sdk/assistant/{assistantId}     the assistant's name, persona, messages and legal links
+///  - GET  /api/v1/chat/messages/{assistantId}/{threadId}   the messages of a conversation, oldest first
 public final class FigoChatClient {
     private let config: FigoChatConfig
     /// Name, email and phone sent with messages; `FigoChat.setCustomerDetails` changes them. Guarded by `lock`.
@@ -14,6 +15,8 @@ public final class FigoChatClient {
     private let lock = NSLock()
     private var _threadId: String?
     private var _threadMode: String?
+    /// Called after a message was delivered (the conversation session's activity). Guarded by `lock`.
+    private var _onActivity: (() -> Void)?
 
     private static let codeSuccess = "00"
     private static let codeLimitReached = "49"
@@ -47,6 +50,15 @@ public final class FigoChatClient {
     /// "ai" or "liveagent".
     public var threadMode: String? { lock.withLock { _threadMode } }
 
+    /// Continues the given thread (an earlier conversation of this visitor in this app run).
+    func restoreThread(_ threadId: String) {
+        lock.withLock { _threadId = threadId }
+    }
+
+    func setOnActivity(_ handler: (() -> Void)?) {
+        lock.withLock { _onActivity = handler }
+    }
+
     /// Forget the current thread so the next message starts a new conversation.
     public func resetThread() {
         lock.withLock {
@@ -77,10 +89,12 @@ public final class FigoChatClient {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (json, response) = try await perform(request)
-        lock.withLock {
+        let onActivity = lock.withLock { () -> (() -> Void)? in
             if let id = response.value(forHTTPHeaderField: "X-Thread-Id"), !id.isEmpty { _threadId = id }
             if let mode = response.value(forHTTPHeaderField: "X-Thread-Mode"), !mode.isEmpty { _threadMode = mode }
+            return _onActivity
         }
+        onActivity?()
         return FigoChatReply(answer: json["responseData"] as? String ?? "", threadId: threadId, threadMode: threadMode)
     }
 
@@ -137,6 +151,32 @@ public final class FigoChatClient {
                 FigoCompanyInfo(termsAndCondition: $0["termsAndCondition"] as? String, privacyPolicy: $0["privacyPolicy"] as? String)
             }
         )
+    }
+
+    /// The messages of a conversation, oldest first: the user's on the right (`.user`), the assistant's and live
+    /// agents' replies (HTML) on the left (`.assistant`). `threadId` defaults to the current thread; an empty array
+    /// when there is none, or when the API doesn't know the thread for this assistant (404).
+    public func getMessages(threadId: String? = nil) async throws -> [FigoChatMessage] {
+        guard let threadId = (threadId ?? self.threadId).flatMap({ $0.isEmpty ? nil : $0 }) else { return [] }
+        let json: [String: Any]
+        do {
+            (json, _) = try await perform(makeRequest(["api", "v1", "chat", "messages", config.assistantId, threadId], method: "GET"))
+        } catch let error as FigoChatError where error.code == "404" {
+            return []
+        }
+        let items = json["responseData"] as? [[String: Any]] ?? []
+        return items.enumerated().compactMap { index, item in
+            let text = item["message"] as? String ?? ""
+            guard !text.isEmpty else { return nil }
+            let role: FigoMessageRole = (item["role"] as? String)?.lowercased() == "user" ? .user : .assistant
+            return FigoChatMessage(
+                id: "history-\(threadId)-\(index)",
+                role: role,
+                text: text,
+                createdAt: parseAPIDate(item["dateCreated"] as? String) ?? Date(),
+                status: .sent
+            )
+        }
     }
 
     /// Public Pusher settings used to subscribe to the thread channel for live agent messages.
@@ -212,4 +252,34 @@ public final class FigoChatClient {
         }
         return (json, http)
     }
+}
+
+/// Parses the API's ISO 8601 dates leniently: with or without fractional seconds (any number of digits) and with
+/// or without a timezone (UTC is assumed when there is none). Nil when the value isn't a date.
+func parseAPIDate(_ value: String?) -> Date? {
+    guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+    let pattern = #"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(\.\d+)?(Z|[+-]\d{2}(?::?\d{2})?)?$"#
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+          let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value))
+    else { return nil }
+    func group(_ i: Int) -> String? { Range(match.range(at: i), in: value).map { String(value[$0]) } }
+    guard let day = group(1), var time = group(2) else { return nil }
+    if time.count == 5 { time += ":00" }
+
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+    guard var date = formatter.date(from: "\(day)T\(time)") else { return nil }
+
+    if let fraction = group(3).flatMap({ Double("0" + $0) }) { date += fraction }
+    if let zone = group(4)?.uppercased(), zone != "Z" {
+        let sign: Double = zone.hasPrefix("-") ? -1 : 1
+        let digits = zone.dropFirst().replacingOccurrences(of: ":", with: "")
+        let hours = Double(digits.prefix(2)) ?? 0
+        let minutes = Double(digits.dropFirst(2)) ?? 0
+        date -= sign * (hours * 3600 + minutes * 60)
+    }
+    return date
 }

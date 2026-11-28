@@ -115,6 +115,8 @@ final class FakeAPI: URLProtocol {
     static var answer = ""
     static var failChat = false
     static var offline = false
+    /// `responseData` of GET /api/v1/chat/messages/asst-1/thread-42; nil answers 404.
+    static var history: [[String: Any]]?
     private static let lock = NSLock()
     private static var _calls: [Call] = []
     static var calls: [Call] { lock.withLock { _calls } }
@@ -123,9 +125,11 @@ final class FakeAPI: URLProtocol {
         assistant: [String: Any] = ["assistantName": "Support Bot", "persona": "Dave", "waitingMessage": "One moment…", "introMessage": "<b>Hi!</b>"],
         answer: String = "<p>Your balance is <b>₦500</b></p>",
         failChat: Bool = false,
-        offline: Bool = false
+        offline: Bool = false,
+        history: [[String: Any]]? = nil
     ) {
         lock.withLock {
+            self.history = history
             self.assistant = assistant
             self.answer = answer
             self.failChat = failChat
@@ -140,9 +144,9 @@ final class FakeAPI: URLProtocol {
 
     override func startLoading() {
         let url = request.url?.absoluteString ?? ""
-        let (assistant, answer, failChat, offline) = Self.lock.withLock { () -> ([String: Any], String, Bool, Bool) in
+        let (assistant, answer, failChat, offline, history) = Self.lock.withLock { () -> ([String: Any], String, Bool, Bool, [[String: Any]]?) in
             Self._calls.append(Call(url: url, method: request.httpMethod, auth: request.value(forHTTPHeaderField: "Authorization"), body: Self.body(of: request)))
-            return (Self.assistant, Self.answer, Self.failChat, Self.offline)
+            return (Self.assistant, Self.answer, Self.failChat, Self.offline, Self.history)
         }
         if offline {
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
@@ -150,6 +154,8 @@ final class FakeAPI: URLProtocol {
         }
         if url.hasSuffix("/api/v1/sdk/assistant/asst-1") {
             respond(200, ["responseCode": "00", "responseData": assistant])
+        } else if url.hasSuffix("/api/v1/chat/messages/asst-1/thread-42"), let history {
+            respond(200, ["responseCode": "00", "responseMessage": "Success", "responseData": history])
         } else if url.contains("/api/v1/chat/assistant/") {
             if failChat {
                 respond(401, "Unauthorized: Invalid api-key was passed")
@@ -327,7 +333,8 @@ final class DetailsFormTests: XCTestCase {
     private func reset() {
         if FigoChat.isInitialized { FigoChat.logout() }
         storage.removePersistentDomain(forName: suite)
-        FigoChat.forgetSkipsForTesting()
+        FigoChat.forgetSessionsForTesting()
+        FigoChat.clock = { Date() }
     }
 
     private func initializeAnonymous(firstCustomerMessage: String? = nil, askForDetails: Bool = true, defaultCountry: String? = nil) throws {
@@ -400,7 +407,8 @@ final class DetailsFormTests: XCTestCase {
         XCTAssertEqual(chat.body as NSDictionary?, [
             "question": "Where is my order?", "fullName": "Ada Lovelace", "emailAddress": "ada@example.com", "phoneNumber": "+447700900123",
         ])
-        XCTAssertEqual(try savedDetails(), details)
+        XCTAssertNil(try savedDetails(), "form details stay in memory")
+        XCTAssertNil(storage.dictionaryRepresentation().keys.first { $0.hasPrefix("figochat.") })
     }
 
     func testTheCountryIsTheDefaultCountryWhenKnownElseNigeria() {
@@ -463,17 +471,104 @@ final class DetailsFormTests: XCTestCase {
         XCTAssertFalse(FigoChat.needsDetails)
     }
 
-    func testAReturningVisitorIsNotAskedAgainAndLogoutForgetsTheirDetails() async throws {
+    func testDetailsAreKeptInMemoryForTheSessionNotOnTheDeviceAndLogoutForgetsThem() async throws {
+        // what an older version saved is removed on initialize
+        storage.set(try JSONEncoder().encode(FigoCustomerDetails(fullName: "Old", emailAddress: "old@x.io", mobilePhone: "+1")), forKey: "figochat.details.asst-1")
         try initializeAnonymous()
-        try fillAndSubmit(FigoDetailsFormModel(defaultCountry: nil))
-        XCTAssertNotNil(try savedDetails())
+        XCTAssertNil(storage.data(forKey: "figochat.details.asst-1"))
+        XCTAssertTrue(FigoChat.needsDetails, "the old saved details aren't used")
 
-        try initializeAnonymous() // e.g. the next app launch
+        try fillAndSubmit(FigoDetailsFormModel(defaultCountry: nil))
+        XCTAssertNil(try savedDetails())
+
+        try initializeAnonymous() // e.g. opening the chat again later in the same run
         XCTAssertFalse(FigoChat.needsDetails)
         XCTAssertEqual(FigoChat.customerDetails.emailAddress, "ada@example.com")
         XCTAssertEqual(try FigoChat.config.mobilePhone, "+447700900123")
+        XCTAssertNil(try savedDetails())
+
         FigoChat.logout()
-        XCTAssertNil(storage.data(forKey: "figochat.details.asst-1"))
+        try initializeAnonymous()
+        XCTAssertTrue(FigoChat.needsDetails)
+
+        // a new app run starts with nothing (in-memory only)
+        try fillAndSubmit(FigoDetailsFormModel(defaultCountry: nil))
+        FigoChat.forgetSessionsForTesting()
+        try initializeAnonymous()
+        XCTAssertTrue(FigoChat.needsDetails)
+        XCTAssertEqual(FigoChat.customerDetails, FigoCustomerDetails())
+    }
+
+    func testAfterAnHourWithoutActivityTheThreadAndDetailsAreForgottenAndTheFormIsShownAgain() async throws {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        FigoChat.clock = { now }
+        try initializeAnonymous()
+        let screen = FigoChatViewModel()
+        try fillAndSubmit(FigoDetailsFormModel(defaultCountry: nil))
+        _ = try await FigoChat.client.sendMessage("Hello")
+        XCTAssertEqual(FigoChat.threadId, "thread-42")
+        screen.messages = [FigoChatMessage(id: "m1", role: .user, text: "Hello")]
+
+        now += FigoChat.sessionLifetime - 1
+        XCTAssertFalse(FigoChat.expireSessionIfNeeded())
+        XCTAssertEqual(FigoChat.threadId, "thread-42")
+
+        now += 1
+        XCTAssertTrue(FigoChat.expireSessionIfNeeded())
+        XCTAssertNil(FigoChat.threadId)
+        XCTAssertEqual(FigoChat.customerDetails, FigoCustomerDetails())
+        XCTAssertTrue(FigoChat.needsDetails)
+        XCTAssertNil(FigoChat.firstExchange)
+        XCTAssertTrue(screen.needsDetails)
+        XCTAssertTrue(screen.messages.isEmpty)
+        XCTAssertFalse(FigoChat.expireSessionIfNeeded(), "nothing left to expire")
+
+        // the next message goes without the old details or thread
+        try fillAndSubmit(FigoDetailsFormModel(defaultCountry: nil))
+        _ = try await FigoChat.client.sendMessage("Hi again")
+        XCTAssertNil(chatCalls.last?.body?["threadId"])
+
+        // initialize after an hour also starts over
+        now += FigoChat.sessionLifetime
+        try initializeAnonymous()
+        XCTAssertTrue(FigoChat.needsDetails)
+        XCTAssertNil(FigoChat.threadId)
+    }
+
+    func testActivityKeepsTheSessionAliveAndInitializeContinuesIt() async throws {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        FigoChat.clock = { now }
+        try initializeAnonymous()
+        try fillAndSubmit(FigoDetailsFormModel(defaultCountry: nil))
+        _ = try await FigoChat.client.sendMessage("Hello")
+
+        now += 50 * 60
+        _ = try await FigoChat.client.sendMessage("Still there?") // a message sent and its reply
+        now += 50 * 60
+        FigoChat.noteActivity() // a live agent message
+        now += 50 * 60
+        XCTAssertFalse(FigoChat.expireSessionIfNeeded())
+
+        try initializeAnonymous() // the same visitor opens the chat again within the hour
+        XCTAssertFalse(FigoChat.needsDetails)
+        XCTAssertEqual(FigoChat.threadId, "thread-42")
+        XCTAssertEqual(FigoChat.customerDetails.fullName, "Ada Lovelace")
+
+        now += FigoChat.sessionLifetime
+        XCTAssertTrue(FigoChat.expireSessionIfNeeded())
+        XCTAssertTrue(FigoChat.needsDetails)
+    }
+
+    func testExpiryKeepsDetailsTheAppPassedAndDoesNotAskForThem() async throws {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        FigoChat.clock = { now }
+        try FigoChat.initialize(apiKey: "k", fullName: "Ada", emailAddress: "a@b.c", mobilePhone: "+1", assistantId: "asst-1", primaryColor: "#F97316")
+        _ = try await FigoChat.client.sendMessage("Hello")
+        now += FigoChat.sessionLifetime
+        XCTAssertTrue(FigoChat.expireSessionIfNeeded())
+        XCTAssertNil(FigoChat.threadId)
+        XCTAssertFalse(FigoChat.needsDetails)
+        XCTAssertEqual(FigoChat.customerDetails, FigoCustomerDetails(fullName: "Ada", emailAddress: "a@b.c", mobilePhone: "+1"))
     }
 
     func testSkippingChatsWithoutDetailsAndIsRememberedForThisRun() async throws {
@@ -489,6 +584,12 @@ final class DetailsFormTests: XCTestCase {
 
         try initializeAnonymous() // e.g. opening the chat again later in the same run
         XCTAssertFalse(FigoChat.needsDetails)
+        FigoChat.clock = { Date() + FigoChat.sessionLifetime }
+        XCTAssertTrue(FigoChat.expireSessionIfNeeded())
+        XCTAssertTrue(FigoChat.needsDetails, "the skip ends with the session")
+        XCTAssertFalse(FigoChat.hasSkippedDetails("asst-1"))
+        FigoChat.clock = { Date() }
+        FigoDetailsFormModel(defaultCountry: nil).skip()
         FigoChat.logout()
         XCTAssertFalse(FigoChat.hasSkippedDetails("asst-1"))
     }
@@ -509,5 +610,136 @@ final class DetailsFormTests: XCTestCase {
         try initializeAnonymous(askForDetails: false)
         XCTAssertFalse(FigoChat.needsDetails)
         XCTAssertEqual(FigoChat.customerDetails, FigoCustomerDetails())
+    }
+}
+
+// MARK: - Conversation history, against a fake API
+
+@MainActor
+final class HistoryTests: XCTestCase {
+    private let history: [[String: Any]] = [
+        ["role": "user", "message": "Where is my order?", "isLiveAgent": false, "dateCreated": "2026-11-28T09:15:02.1234567"],
+        ["role": "assistant", "message": "<p>It ships <b>today</b></p>", "isLiveAgent": false, "dateCreated": "2026-11-28T09:15:04Z"],
+        ["role": "assistant", "message": "Hi, Sam here", "isLiveAgent": true, "dateCreated": "2026-11-28T10:15:05.5+01:00"],
+    ]
+
+    override func setUp() {
+        super.setUp()
+        FigoChatClient.protocolClassesForTesting = [FakeAPI.self]
+        FakeAPI.reset()
+        FigoChat.forgetSessionsForTesting()
+    }
+
+    override func tearDown() {
+        FigoChat.logout()
+        FigoChatClient.protocolClassesForTesting = nil
+        super.tearDown()
+    }
+
+    private func initialize(threadId: String? = "thread-42", firstCustomerMessage: String? = nil) throws {
+        try FigoChat.initialize(
+            apiKey: "k", fullName: "Ada", emailAddress: "a@b.c", mobilePhone: "+1", assistantId: "asst-1",
+            primaryColor: "#F97316", firstCustomerMessage: firstCustomerMessage, threadId: threadId
+        )
+    }
+
+    private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<300 where !condition() {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(condition(), "timed out", file: file, line: line)
+    }
+
+    func testGetMessagesDecodesTheThreadOldestFirst() async throws {
+        FakeAPI.reset(history: history)
+        try initialize()
+        let messages = try await FigoChat.client.getMessages()
+        let call = try XCTUnwrap(FakeAPI.calls.first { $0.url.contains("/chat/messages/") })
+        XCTAssertEqual(call.url, "https://api.figolabs.ai/api/v1/chat/messages/asst-1/thread-42")
+        XCTAssertEqual(call.method, "GET")
+        XCTAssertEqual(call.auth, "Bearer k")
+
+        XCTAssertEqual(messages.map(\.role), [.user, .assistant, .assistant])
+        XCTAssertEqual(messages.map(\.text), ["Where is my order?", "<p>It ships <b>today</b></p>", "Hi, Sam here"])
+        XCTAssertEqual(messages.map(\.status), [.sent, .sent, .sent])
+        XCTAssertEqual(Set(messages.map(\.id)).count, 3)
+        let base = Date(timeIntervalSince1970: 1_795_857_300) // 2026-11-28T09:15:00Z
+        XCTAssertEqual(messages[0].createdAt.timeIntervalSince(base), 2.1234567, accuracy: 0.001)
+        XCTAssertEqual(messages[1].createdAt.timeIntervalSince(base), 4, accuracy: 0.001)
+        XCTAssertEqual(messages[2].createdAt.timeIntervalSince(base), 5.5, accuracy: 0.001)
+    }
+
+    func testGetMessagesIsEmptyForAnUnknownThreadOrNoThread() async throws {
+        FakeAPI.reset(history: nil) // 404
+        try initialize()
+        let unknown = try await FigoChat.client.getMessages()
+        XCTAssertEqual(unknown, [])
+
+        try initialize(threadId: nil)
+        let none = try await FigoChat.client.getMessages()
+        XCTAssertEqual(none, [])
+        XCTAssertFalse(FakeAPI.calls.contains { $0.url.contains("/chat/messages/") && !$0.url.hasSuffix("thread-42") })
+    }
+
+    func testGetMessagesThrowsOtherFailures() async throws {
+        FakeAPI.reset(offline: true)
+        try initialize()
+        do {
+            _ = try await FigoChat.client.getMessages()
+            XCTFail("expected an error")
+        } catch let error as FigoChatError {
+            XCTAssertEqual(error.code, "NETWORK")
+        }
+    }
+
+    func testDatesAreParsedLeniently() {
+        let base = Date(timeIntervalSince1970: 1_795_857_300)
+        XCTAssertEqual(parseAPIDate("2026-11-28T09:15:00"), base)
+        XCTAssertEqual(parseAPIDate("2026-11-28 09:15"), base)
+        XCTAssertEqual(parseAPIDate("2026-11-28T09:15:00Z"), base)
+        XCTAssertEqual(parseAPIDate("2026-11-28T04:15:00-0500"), base)
+        XCTAssertEqual(parseAPIDate("2026-11-28T09:15:00.25")?.timeIntervalSince(base) ?? -1, 0.25, accuracy: 0.0001)
+        XCTAssertNil(parseAPIDate("yesterday"))
+        XCTAssertNil(parseAPIDate(nil))
+    }
+
+    func testTheChatShowsTheThreadsHistoryWhenItOpensOnAnActiveThread() async throws {
+        FakeAPI.reset(history: history)
+        try initialize()
+        let screen = FigoChatViewModel()
+        screen.appear()
+        await waitUntil { screen.restoredHistory }
+        await waitUntil { FigoChat.assistantInfo != nil && screen.assistant != nil }
+        XCTAssertEqual(screen.displayMessages.map(\.id).first, "welcome", "the intro stays first")
+        XCTAssertEqual(screen.displayMessages.dropFirst().map(\.text), ["Where is my order?", "<p>It ships <b>today</b></p>", "Hi, Sam here"])
+        screen.disappear()
+
+        // opened again later: fetched again into the new screen
+        let again = FigoChatViewModel()
+        again.appear()
+        await waitUntil { again.restoredHistory }
+        XCTAssertEqual(again.messages.count, 3)
+        again.disappear()
+    }
+
+    func testTheHistoryReplacesTheFirstExchangeAndAFailedFetchChangesNothing() async throws {
+        FakeAPI.reset(history: history)
+        try initialize(threadId: nil, firstCustomerMessage: "Where is my order?")
+        await waitUntil { FigoChat.firstExchange?.done == true }
+        let screen = FigoChatViewModel()
+        screen.appear()
+        await waitUntil { screen.restoredHistory }
+        XCTAssertFalse(screen.displayMessages.contains { $0.id.hasPrefix("first-") })
+        XCTAssertEqual(screen.displayMessages.filter { $0.text == "Where is my order?" }.count, 1)
+        screen.disappear()
+
+        FakeAPI.reset(offline: true)
+        let offline = FigoChatViewModel()
+        offline.appear()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(offline.restoredHistory)
+        XCTAssertTrue(offline.messages.isEmpty)
+        XCTAssertTrue(offline.displayMessages.contains { $0.id.hasPrefix("first-") }, "the first exchange still shows")
+        offline.disappear()
     }
 }

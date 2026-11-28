@@ -8,6 +8,13 @@ Native iOS (Swift, SwiftUI) SDK for chatting with a Figo AI assistant. Users can
 
 ## What's new
 
+### 2.4.0
+
+- **One-hour conversation session:** a conversation (its thread and the details typed into the "Personalize your chat" form, or a skip) lasts one hour from the last activity: a message the user sends, or a reply or live agent message they receive. After an hour without activity the next time the chat opens, or the user sends a message, it starts over: a new thread, and an anonymous visitor sees the details form again (unless `askForDetails` is `false`). Details your app passes to `initialize` or `setCustomerDetails` are never cleared.
+- **Details are kept only for the app's run:** what a visitor types into the form is kept in memory, not on the device, so it's gone when the app's process ends, like a closed browser tab. Phones and tablets are often shared. Details saved on the device by earlier versions are removed on `initialize`.
+- **History is restored:** when the chat opens on an active thread (from earlier in this run of the app, or a `threadId` passed to `initialize`), it shows the conversation's earlier messages, the user's on the right and the assistant's and live agents' on the left, below the welcome message. If the history can't be loaded, the chat still works.
+- New `FigoChat.client.getMessages(threadId:)` returns a thread's messages, oldest first (`GET /api/v1/chat/messages/{assistantId}/{threadId}`; the current thread by default, an empty array for an unknown thread).
+
 ### 2.3.0
 
 - **Consent checkbox:** when the company has both Terms and conditions and a Privacy policy set in the FigoChat admin, the details form shows "I have read and agreed to the Terms, conditions, and privacy policy" with a checkbox. "Terms, conditions" and "privacy policy" open their pages (when they're web links), and **Start chat** stays disabled until the box is checked. **Skip** still works. With only one of the two set, there's no checkbox.
@@ -24,7 +31,7 @@ In Xcode, choose **File → Add Package Dependencies…**, enter `https://github
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/figoailabs/figochat-ios.git", from: "2.3.0"),
+    .package(url: "https://github.com/figoailabs/figochat-ios.git", from: "2.4.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "FigoChat", package: "figochat-ios")]),
@@ -61,7 +68,7 @@ The header title, welcome message and waiting message come from the chatbot's se
 
 `initialize` throws `FigoChatError` with code `CONFIG` if a required value is empty or the color isn't hex.
 
-**Users you don't know:** leave `fullName`, `emailAddress` and `mobilePhone` out and the chat asks for them with a short form (name, email, phone with a searchable country-code picker) that the user can skip. Submitted details are used as if passed to `initialize` and remembered on the device (UserDefaults); `logout` forgets them. Set `askForDetails: false` to skip the form, `defaultCountry` to preselect a country (ISO code; Nigeria when unset or unknown), and call `setCustomerDetails` when the user signs in later. If the company has both Terms and conditions and a Privacy policy, the form asks the user to agree to them before **Start chat**. The chatbot's disclaimer, if set, appears above the footer.
+**Users you don't know:** leave `fullName`, `emailAddress` and `mobilePhone` out and the chat asks for them with a short form (name, email, phone with a searchable country-code picker) that the user can skip. Submitted details are used as if passed to `initialize` and kept in memory for the conversation session only: one hour from the last message sent or received, and never after the app's process ends. `logout` forgets them. Set `askForDetails: false` to skip the form, `defaultCountry` to preselect a country (ISO code; Nigeria when unset or unknown), and call `setCustomerDetails` when the user signs in later. If the company has both Terms and conditions and a Privacy policy, the form asks the user to agree to them before **Start chat**. The chatbot's disclaimer, if set, appears above the footer.
 
 ## Show the chat
 
@@ -88,6 +95,7 @@ FigoChat.logout()             // clear settings on sign-out
 let reply = try await FigoChat.client.sendMessage("Hello")
 let text = try await FigoChat.client.transcribe(audioFile: fileURL)
 let urls = try await FigoChat.client.uploadFiles([FigoUploadFile(name: "receipt.jpg", data: data, mimeType: "image/jpeg")])
+let history = try await FigoChat.client.getMessages()  // the current thread's messages, oldest first
 ```
 
 ### Events
